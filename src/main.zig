@@ -1,10 +1,16 @@
 pub const Message = struct {
+    header: Header,
+    question: ?[]Question = null,
+    answer: ?[]Resource = null,
+    authority: ?[]Authority = null,
+    additional: ?[]Additional = null,
+
     pub const Header = packed struct(u96) {
         arcount: u16,
         nscount: u16,
         ancount: u16,
         qdcount: u16,
-        rcode: u4,
+        rcode: RCode,
         z: u3,
         ra: bool,
         rd: bool,
@@ -13,8 +19,45 @@ pub const Message = struct {
         opcode: u4,
         qr: bool,
         id: u16,
+
+        pub const RCode = enum(u4) {
+            success = 0,
+            format,
+            server,
+            name,
+            not_implemented,
+            refused,
+            _, // Reserved for future use
+        };
     };
+
+    pub const Question = struct {
+        name: Name,
+        qtype: Type,
+        class: Class,
+
+        pub const Name = []Label;
+
+        pub const Type = u16;
+
+        pub const Class = u16;
+    };
+
+    pub const Resource = struct {
+        name: void,
+        rtype: u16,
+        class: u16,
+        ttl: u32,
+        rdlength: u16,
+        data: void,
+    };
+
+    pub const Authority = struct {};
+
+    pub const Additional = struct {};
 };
+
+pub const Label = struct {};
 
 test "Message.Header" {
     const thing: Message.Header = .{
@@ -26,7 +69,7 @@ test "Message.Header" {
         .rd = false,
         .ra = false,
         .z = 0,
-        .rcode = 0,
+        .rcode = .success,
         .qdcount = 0,
         .ancount = 0,
         .nscount = 0,
