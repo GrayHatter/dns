@@ -37,19 +37,49 @@ pub const Message = struct {
         class: Class,
 
         pub const Name = []Label;
-
-        pub const Type = u16;
-
-        pub const Class = u16;
     };
 
     pub const Resource = struct {
         name: void,
-        rtype: u16,
+        rtype: Type,
         class: u16,
         ttl: u32,
         rdlength: u16,
         data: void,
+    };
+
+    pub const Type = enum(u16) {
+        a = 1,
+        ns,
+        md, // obsolote -> mx
+        mf, // obsolote -> mx
+        cname,
+        sao,
+        mb,
+        mg,
+        mr,
+        null,
+        wks,
+        ptr,
+        hinfo,
+        minfo,
+        mx,
+        txt,
+        // The following are QTypes
+        axfr = 252,
+        mailb,
+        maila,
+        all_records, // defined in the RFC as *
+        _,
+    };
+
+    pub const Class = enum(u16) {
+        in = 1,
+        cs,
+        ch,
+        hs,
+        any_class = 255,
+        _,
     };
 
     pub const Authority = struct {};
