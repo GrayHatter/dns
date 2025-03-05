@@ -5,13 +5,20 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
+        .root_source_file = b.path("src/dns.zig"),
         .target = target,
         .optimize = optimize,
     });
 
+    const dnsc_mod = b.createModule(.{
+        .root_source_file = b.path("src/client.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    _ = dnsc_mod;
+
     const exe = b.addExecutable(.{
-        .name = "dns",
+        .name = "dnsc",
         .root_module = exe_mod,
     });
 

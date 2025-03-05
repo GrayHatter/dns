@@ -104,9 +104,11 @@ pub const Message = struct {
                 .class = .in,
             };
         }
+
+        // TODO only byteswap when endian changes
         return .{
             .header = .{
-                .id = 31337,
+                .id = @byteSwap(@as(u16, 31337)),
                 .qr = false,
                 .opcode = 0,
                 .aa = false,
@@ -114,7 +116,7 @@ pub const Message = struct {
                 .rd = true,
                 .ra = false,
                 .rcode = .success,
-                .qdcount = @truncate(queries.len),
+                .qdcount = @byteSwap(@as(u16, @truncate(queries.len))),
                 .ancount = 0,
                 .nscount = 0,
                 .arcount = 0,
@@ -126,7 +128,7 @@ pub const Message = struct {
     test query {
         const q = try query(std.testing.allocator, &[1][]const u8{"gr.ht."});
         try std.testing.expectEqual(
-            @as(u96, 37884113131630398792389361664),
+            @as(u96, 32643419703672757439099305984),
             @as(u96, @bitCast(q.header)),
         );
         for (q.question.?) |qst| {
