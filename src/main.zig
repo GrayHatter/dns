@@ -11,7 +11,7 @@ pub const Message = struct {
         ancount: u16,
         qdcount: u16,
         rcode: RCode,
-        z: u3,
+        z: u3 = 0,
         ra: bool,
         rd: bool,
         tc: bool,
@@ -85,9 +85,61 @@ pub const Message = struct {
     pub const Authority = struct {};
 
     pub const Additional = struct {};
+
+    pub fn query(a: Allocator, fqdn: []const []const u8) !Message {
+        const queries = try a.alloc(Question, fqdn.len);
+        for (queries, fqdn) |*q, dn| {
+            const label = try a.alloc(Label, std.mem.count(u8, dn, "."));
+            var itr = std.mem.splitScalar(u8, dn, '.');
+            for (label) |*l| {
+                const n = itr.next().?;
+                l.* = .{
+                    .len = @intCast(n.len),
+                    .name = n,
+                };
+            }
+            q.* = .{
+                .name = label,
+                .qtype = .a,
+                .class = .in,
+            };
+        }
+        return .{
+            .header = .{
+                .id = 31337,
+                .qr = false,
+                .opcode = 0,
+                .aa = false,
+                .tc = false,
+                .rd = true,
+                .ra = false,
+                .rcode = .success,
+                .qdcount = @truncate(queries.len),
+                .ancount = 0,
+                .nscount = 0,
+                .arcount = 0,
+            },
+            .question = queries,
+        };
+    }
+
+    test query {
+        const q = try query(std.testing.allocator, &[1][]const u8{"gr.ht."});
+        try std.testing.expectEqual(
+            @as(u96, 37884113131630398792389361664),
+            @as(u96, @bitCast(q.header)),
+        );
+        for (q.question.?) |qst| {
+            std.testing.allocator.free(qst.name);
+        }
+        std.testing.allocator.free(q.question.?);
+    }
 };
 
-pub const Label = struct {};
+pub const Label = struct {
+    len: u6,
+    name: []const u8,
+};
 
 test "Message.Header" {
     const thing: Message.Header = .{
@@ -98,7 +150,6 @@ test "Message.Header" {
         .tc = false,
         .rd = false,
         .ra = false,
-        .z = 0,
         .rcode = .success,
         .qdcount = 0,
         .ancount = 0,
@@ -137,3 +188,4 @@ test "fuzz example" {
 
 const std = @import("std");
 const log = std.log;
+const Allocator = std.mem.Allocator;
