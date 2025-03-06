@@ -1,3 +1,7 @@
+pub const Domains = struct {
+    strings: std.ArrayListUnmanaged(u8),
+};
+
 pub const Message = struct {
     header: Header,
     question: ?[]Question = null,
@@ -38,11 +42,11 @@ pub const Message = struct {
             return .{
                 .id = id,
                 .qr = 0x80 & hbits != 0,
-                .opcode = 0,
+                .opcode = @truncate((0x70 & hbits) >> 3),
                 .aa = 0x4 & hbits != 0,
                 .tc = 0x2 & hbits != 0,
                 .rd = 0x1 & hbits != 0,
-                .ra = 0x8 & hbits != 0,
+                .ra = 0x80 & lbits != 0,
                 .rcode = @enumFromInt(0xf & (lbits)),
                 .qdcount = @byteSwap(@as(u16, @bitCast(bytes[4..6].*))),
                 .ancount = @byteSwap(@as(u16, @bitCast(bytes[6..8].*))),
@@ -81,6 +85,42 @@ pub const Message = struct {
             try w.writeByte(0);
             try w.writeInt(u16, @intFromEnum(q.qtype), .big);
             try w.writeInt(u16, @intFromEnum(q.class), .big);
+        }
+
+        pub fn fromBytes(a: Allocator, bytes: []const u8) !Question {
+            const end = indexOfScalar(u8, bytes, 0) orelse return error.InvalidQuestion;
+            if (bytes.len < end + 4) return error.InvalidQuestion;
+            const qtype: Type = @enumFromInt(@byteSwap(@as(u16, bytes[end + 1 .. end + 3].*)));
+            const class: Class = @enumFromInt(@byteSwap(@as(u16, bytes[end + 3 .. end + 5].*)));
+
+            var idx: usize = 0;
+            var count: usize = 0;
+            sw: switch (bytes[idx]) {
+                0...63 => |b| {
+                    count += 1;
+                    idx += b + 1;
+                    if (idx >= bytes.len) return error.InvalidLabel;
+                    continue :sw bytes[idx];
+                },
+                192...255 => |b| {
+                    count += 1;
+                    idx += 2;
+                    if (idx >= bytes.len) return error.InvalidLabel;
+                    const offset: u16 = b & 0b111111 << 8 | bytes[idx - 1];
+                    if (offset >= bytes.len) return error.InvalidLabel;
+                    count += 1;
+                    continue :sw bytes[idx];
+                },
+                else => return error.InvalidLabel,
+            }
+
+            const labels = try a.alloc(Label, count);
+
+            return .{
+                .name = labels,
+                .qtype = qtype,
+                .class = class,
+            };
         }
     };
 
@@ -308,3 +348,4 @@ test "fuzz example" {
 const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
+const indexOfScalar = std.mem.indexOfScalar;
