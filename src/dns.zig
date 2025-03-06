@@ -2,8 +2,8 @@ pub const Message = struct {
     header: Header,
     question: ?[]Question = null,
     answer: ?[]Resource = null,
-    authority: ?[]Authority = null,
-    additional: ?[]Additional = null,
+    authority: ?[]Resource = null,
+    additional: ?[]Resource = null,
 
     pub const Header = packed struct(u96) {
         arcount: u16,
@@ -127,14 +127,6 @@ pub const Message = struct {
         hs,
         any_class = 255,
         _,
-    };
-
-    pub const Authority = struct {
-        pub fn write(_: Authority) void {}
-    };
-
-    pub const Additional = struct {
-        pub fn write(_: Additional) void {}
     };
 
     pub fn fromBytes(a: Allocator, bytes: []const u8) !Message {
