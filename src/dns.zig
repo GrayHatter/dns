@@ -29,6 +29,27 @@ pub const Message = struct {
             refused,
             _, // Reserved for future use
         };
+
+        pub fn fromBytes(bytes: [12]u8) Header {
+            const id: u16 = @byteSwap(@as(u16, @bitCast(bytes[0..2].*)));
+            const hbits: u8 = bytes[2];
+            const lbits: u8 = bytes[3];
+
+            return .{
+                .id = id,
+                .qr = 0x80 & hbits != 0,
+                .opcode = 0,
+                .aa = 0x4 & hbits != 0,
+                .tc = 0x2 & hbits != 0,
+                .rd = 0x1 & hbits != 0,
+                .ra = 0x8 & hbits != 0,
+                .rcode = @enumFromInt(0xf & (lbits)),
+                .qdcount = @byteSwap(@as(u16, @bitCast(bytes[4..6].*))),
+                .ancount = @byteSwap(@as(u16, @bitCast(bytes[6..8].*))),
+                .nscount = @byteSwap(@as(u16, @bitCast(bytes[8..10].*))),
+                .arcount = @byteSwap(@as(u16, @bitCast(bytes[10..12].*))),
+            };
+        }
     };
 
     pub const Question = struct {
@@ -115,6 +136,17 @@ pub const Message = struct {
     pub const Additional = struct {
         pub fn write(_: Additional) void {}
     };
+
+    pub fn fromBytes(a: Allocator, bytes: []const u8) !Message {
+        if (bytes.len < 12) return error.MessageTooSmall;
+        const header: Header = .fromBytes(bytes[0..12].*);
+
+        std.debug.print("{}\n", .{header});
+        _ = a;
+        return .{
+            .header = header,
+        };
+    }
 
     pub fn query(a: Allocator, fqdn: []const []const u8) !Message {
         const queries = try a.alloc(Question, fqdn.len);
@@ -255,6 +287,19 @@ pub fn server() !void {
     const buffer: [1024]u8 = undefined;
     const icnt = try std.posix.recv(sock, &buffer, 0);
     std.debug.print("sent {}\n", .{icnt});
+}
+
+test "grht vectors" {
+    const a = std.testing.allocator;
+    const vector = [_]u8{
+        122, 105, 129, 128, 0,   1,   0, 1,  0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0,  1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 14, 16, 0, 4, 144,
+        126, 209, 12,
+    };
+    const msg = try Message.fromBytes(a, &vector);
+
+    _ = msg;
 }
 
 test "simple test" {}
