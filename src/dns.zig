@@ -1,5 +1,11 @@
 pub const Domains = struct {
     strings: std.ArrayListUnmanaged(u8),
+    loc_table: std.HashMapUnmanaged(
+        u32,
+        void,
+        std.hash_map.StringIndexContext,
+        std.hash_map.default_max_load_percentage,
+    ),
 };
 
 pub const Message = struct {
@@ -57,80 +63,33 @@ pub const Message = struct {
     };
 
     pub const Question = struct {
-        name: Name,
+        name: []const u8,
         qtype: Type,
         class: Class,
 
-        pub const Name = []Label;
-
-        pub fn init(a: Allocator, name: []const u8) !Question {
-            const label = try a.alloc(Label, std.mem.count(u8, name, "."));
-            var itr = std.mem.splitScalar(u8, name, '.');
-            for (label) |*l| {
-                const n = itr.next().?;
-                l.* = .{
-                    .len = @intCast(n.len),
-                    .name = n,
-                };
-            }
+        pub fn init(name: []const u8) !Question {
             return .{
-                .name = label,
+                .name = name,
                 .qtype = .a,
                 .class = .in,
             };
         }
 
         pub fn write(q: Question, w: *std.io.AnyWriter) !void {
-            for (q.name) |l| try l.write(w);
+            try Label.writeName(q.name, w);
             try w.writeByte(0);
             try w.writeInt(u16, @intFromEnum(q.qtype), .big);
             try w.writeInt(u16, @intFromEnum(q.class), .big);
         }
-
-        pub fn fromBytes(a: Allocator, bytes: []const u8) !Question {
-            const end = indexOfScalar(u8, bytes, 0) orelse return error.InvalidQuestion;
-            if (bytes.len < end + 4) return error.InvalidQuestion;
-            const qtype: Type = @enumFromInt(@byteSwap(@as(u16, bytes[end + 1 .. end + 3].*)));
-            const class: Class = @enumFromInt(@byteSwap(@as(u16, bytes[end + 3 .. end + 5].*)));
-
-            var idx: usize = 0;
-            var count: usize = 0;
-            sw: switch (bytes[idx]) {
-                0...63 => |b| {
-                    count += 1;
-                    idx += b + 1;
-                    if (idx >= bytes.len) return error.InvalidLabel;
-                    continue :sw bytes[idx];
-                },
-                192...255 => |b| {
-                    count += 1;
-                    idx += 2;
-                    if (idx >= bytes.len) return error.InvalidLabel;
-                    const offset: u16 = b & 0b111111 << 8 | bytes[idx - 1];
-                    if (offset >= bytes.len) return error.InvalidLabel;
-                    count += 1;
-                    continue :sw bytes[idx];
-                },
-                else => return error.InvalidLabel,
-            }
-
-            const labels = try a.alloc(Label, count);
-
-            return .{
-                .name = labels,
-                .qtype = qtype,
-                .class = class,
-            };
-        }
     };
 
     pub const Resource = struct {
-        name: void,
+        name: []const u8,
         rtype: Type,
-        class: u16,
+        class: Class,
         ttl: u32,
         rdlength: u16,
-        data: void,
+        rdata: []const u8,
 
         pub fn write(_: Resource) void {}
     };
@@ -172,18 +131,54 @@ pub const Message = struct {
     pub fn fromBytes(a: Allocator, bytes: []const u8) !Message {
         if (bytes.len < 12) return error.MessageTooSmall;
         const header: Header = .fromBytes(bytes[0..12].*);
-
         std.debug.print("{}\n", .{header});
-        _ = a;
+
+        var idx: usize = 12;
+
+        const questions = try a.alloc(Question, header.qdcount);
+        for (questions) |*q| {
+            const name = try Label.getName(a, bytes, &idx);
+            defer a.free(name);
+            std.debug.print("{s}\n", .{name});
+            q.* = .{
+                .name = name,
+                .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][0..2].*)))),
+                .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][2..4].*)))),
+            };
+            std.debug.print("{any}\n", .{q.*});
+            idx += 4;
+        }
+
+        const resources = try a.alloc(Resource, header.ancount);
+        for (resources) |*r| {
+            std.debug.print("{} {}\n", .{ idx, bytes[idx] });
+            const name = try Label.getName(a, bytes, &idx);
+            defer a.free(name);
+            std.debug.print("{s}\n", .{name});
+            const rdlen: u16 = @byteSwap(@as(u16, @bitCast(bytes[idx..][8..10].*)));
+            r.* = .{
+                .name = name,
+                .rtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][0..2].*)))),
+                .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][2..4].*)))),
+                .ttl = @byteSwap(@as(u32, @bitCast(bytes[idx..][4..8].*))),
+                .rdlength = rdlen,
+                .rdata = bytes[idx..][10..][0..rdlen],
+            };
+            std.debug.print("{any}\n", .{r.*});
+            if (r.*.rtype != .a) @panic("not implemented");
+        }
+
         return .{
             .header = header,
+            .question = questions,
+            .answer = resources,
         };
     }
 
     pub fn query(a: Allocator, fqdn: []const []const u8) !Message {
         const queries = try a.alloc(Question, fqdn.len);
         for (queries, fqdn) |*q, dn| {
-            q.* = try .init(a, dn);
+            q.* = try .init(dn);
         }
 
         // TODO only byteswap when endian changes
@@ -237,7 +232,8 @@ pub const Message = struct {
             @as(u96, @bitCast(q.header)),
         );
         for (q.question.?) |qst| {
-            std.testing.allocator.free(qst.name);
+            _ = qst;
+            //std.testing.allocator.free(qst.name);
         }
         std.testing.allocator.free(q.question.?);
     }
@@ -246,6 +242,65 @@ pub const Message = struct {
 pub const Label = struct {
     len: u6,
     name: []const u8,
+
+    pub const Packed = struct {
+        offset: usize,
+        str: []const u8,
+        rest: ?u16 = null,
+    };
+
+    pub fn init(a: Allocator, name: []const u8) ![]Label {
+        const label = try a.alloc(Label, std.mem.count(u8, name, "."));
+        var itr = std.mem.splitScalar(u8, name, '.');
+        for (label) |*l| {
+            const n = itr.next().?;
+            l.* = .{
+                .len = @intCast(n.len),
+                .name = n,
+            };
+        }
+        return label;
+    }
+
+    pub fn getName(a: Allocator, bytes: []const u8, index: *usize) ![]u8 {
+        var name = try std.ArrayListUnmanaged(u8).initCapacity(a, 285);
+        var idx: usize = index.*;
+        var pointered: bool = false;
+        sw: switch (bytes[idx]) {
+            0 => {
+                if (!pointered) index.* = idx + 1;
+                return try name.toOwnedSlice(a);
+            },
+            1...63 => |b| {
+                idx += b + 1;
+                if (idx >= bytes.len) return error.InvalidLabel;
+                name.appendSliceAssumeCapacity(bytes[idx - b .. idx]);
+                name.appendAssumeCapacity('.');
+                continue :sw bytes[idx];
+            },
+            192...255 => |b| {
+                pointered = true;
+                idx += 2;
+                if (idx >= bytes.len) return error.InvalidLabel;
+                index.* = idx;
+                const offset: u16 = @as(u16, b & 0b111111) << 8 | bytes[idx - 1];
+                if (offset < 12 or offset >= bytes.len) return error.InvalidLabel;
+                idx = offset;
+                continue :sw bytes[idx];
+            },
+            else => return error.InvalidLabel,
+        }
+        @panic("unreachable");
+    }
+
+    pub fn writeName(name: []const u8, w: *std.io.AnyWriter) !void {
+        var itr = std.mem.splitScalar(u8, name, '.');
+        while (itr.next()) |n| {
+            std.debug.assert(n.len <= 63);
+            try w.writeByte(@intCast(n.len));
+            try w.writeAll(n);
+        }
+    }
 
     pub fn write(l: Label, w: *std.io.AnyWriter) !void {
         try w.writeByte(l.len);
@@ -330,8 +385,10 @@ test "grht vectors" {
         126, 209, 12,
     };
     const msg = try Message.fromBytes(a, &vector);
-
-    _ = msg;
+    try std.testing.expectEqual(1, msg.question.?.len);
+    try std.testing.expectEqual(1, msg.answer.?.len);
+    a.free(msg.question.?);
+    a.free(msg.answer.?);
 }
 
 test "simple test" {}
