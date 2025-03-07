@@ -4,7 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe_mod = b.createModule(.{
+    const dns_mod = b.createModule(.{
         .root_source_file = b.path("src/dns.zig"),
         .target = target,
         .optimize = optimize,
@@ -15,16 +15,21 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    _ = dnsc_mod;
 
-    const exe = b.addExecutable(.{
-        .name = "dnsc",
-        .root_module = exe_mod,
+    const dnsd_mod = b.createModule(.{
+        .root_source_file = b.path("src/server.zig"),
+        .target = target,
+        .optimize = optimize,
     });
 
-    b.installArtifact(exe);
+    const exe_c = b.addExecutable(.{
+        .name = "dnsc",
+        .root_module = dnsc_mod,
+    });
 
-    const run_cmd = b.addRunArtifact(exe);
+    b.installArtifact(exe_c);
+
+    const run_cmd = b.addRunArtifact(exe_c);
 
     run_cmd.step.dependOn(b.getInstallStep());
 
@@ -35,12 +40,10 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
     const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
+    inline for (.{ dns_mod, dnsc_mod, dnsd_mod }) |mod| {
+        const tests = b.addTest(.{ .root_module = mod });
+        const test_run = b.addRunArtifact(tests);
+        test_step.dependOn(&test_run.step);
+    }
 }
