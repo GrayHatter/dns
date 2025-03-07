@@ -77,7 +77,7 @@ pub const Message = struct {
 
         pub fn write(q: Question, w: *std.io.AnyWriter) !void {
             try Label.writeName(q.name, w);
-            try w.writeByte(0);
+            if (q.name[q.name.len - 1] != '.') try w.writeByte(0);
             try w.writeInt(u16, @intFromEnum(q.qtype), .big);
             try w.writeInt(u16, @intFromEnum(q.class), .big);
         }
@@ -330,19 +330,71 @@ test "Message.Header" {
     );
 }
 
-test "grht vectors" {
-    const a = std.testing.allocator;
-    const vector = [_]u8{
-        122, 105, 129, 128, 0,   1,   0, 1,  0,  0, 0, 0,
-        2,   103, 114, 2,   104, 116, 0, 0,  1,  0, 1, 192,
-        12,  0,   1,   0,   1,   0,   0, 14, 16, 0, 4, 127,
-        4,   20,  69,
-    };
-    const msg = try Message.fromBytes(a, &vector);
+fn testVector(a: Allocator, vect: []const u8) !void {
+    const msg = try Message.fromBytes(a, vect);
     try std.testing.expectEqual(1, msg.question.?.len);
     try std.testing.expectEqual(1, msg.answer.?.len);
     a.free(msg.question.?);
     a.free(msg.answer.?);
+}
+
+test "build pkt" {
+    const a = std.testing.allocator;
+    const msg = try Message.query(a, &[1][]const u8{"gr.ht."});
+    var buffer: [23]u8 = undefined;
+    const used = try msg.write(&buffer);
+    a.free(msg.question.?);
+
+    try std.testing.expect(used == 23);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &[23]u8{
+            122, 105, 1,   0, 0,   1,   0, 0, 0, 0, 0, 0,
+            2,   103, 114, 2, 104, 116, 0, 0, 1, 0, 1,
+        },
+        buffer[0..23],
+    );
+}
+
+test "build pkt non-fqdn" {
+    const a = std.testing.allocator;
+    const msg = try Message.query(a, &[1][]const u8{"gr.ht"});
+    var buffer: [23]u8 = undefined;
+    const used = try msg.write(&buffer);
+    a.free(msg.question.?);
+
+    try std.testing.expect(used == 23);
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &[23]u8{
+            122, 105, 1,   0, 0,   1,   0, 0, 0, 0, 0, 0,
+            2,   103, 114, 2, 104, 116, 0, 0, 1, 0, 1,
+        },
+        buffer[0..23],
+    );
+}
+
+test "grht vectors" {
+    const a = std.testing.allocator;
+    try testVector(a, &[_]u8{
+        122, 105, 129, 128, 0,   1,   0, 1,  0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0,  1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 14, 16, 0, 4, 127,
+        4,   20,  69,
+    });
+
+    //try testVector(a, &[_]u8{
+    //    122, 105, 129, 131, 0,   1,   0,   0,   0,   1,   0,   0,   2,   64,
+    //    49,  1,   49,  1,   49,  1,   49,  0,   0,   1,   0,   1,   0,   0,
+    //    6,   0,   1,   0,   1,   81,  128, 0,   64,  1,   97,  12,  114, 111,
+    //    111, 116, 45,  115, 101, 114, 118, 101, 114, 115, 3,   110, 101, 116,
+    //    0,   5,   110, 115, 116, 108, 100, 12,  118, 101, 114, 105, 115, 105,
+    //    103, 110, 45,  103, 114, 115, 3,   99,  111, 109, 0,   120, 179, 132,
+    //    44,  0,   0,   7,   8,   0,   0,   3,   132, 0,   9,   58,  128, 0,
+    //    1,   81,  128,
+    //});
 }
 
 test "simple test" {}
