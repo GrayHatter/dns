@@ -2,12 +2,26 @@ pub fn main() !void {
     const a = std.heap.page_allocator;
     std.debug.print("started\n", .{});
 
+    var domain: ?[]const u8 = null;
+    var nameserver: [4]u8 = @splat(0);
+    var argsi = std.process.args();
+    while (argsi.next()) |arg| {
+        if (arg[0] == '@') {
+            var itr = std.mem.splitScalar(u8, arg[1..], '.');
+            for (&nameserver) |*n| {
+                n.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
+            }
+        } else {
+            domain = arg;
+        }
+    }
+
     const addr: std.net.Address = .{ .in = .{ .sa = .{
         .port = std.mem.nativeToBig(u16, 53),
-        .addr = std.mem.bytesToValue(u32, &[4]u8{ 0, 0, 0, 0 }),
+        .addr = std.mem.bytesToValue(u32, &nameserver),
     } } };
 
-    const msg = try DNS.Message.query(a, &[1][]const u8{"gr.ht."});
+    const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
     var request: [1024]u8 = undefined;
     const msgsize = try msg.write(&request);
 
