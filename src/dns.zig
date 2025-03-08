@@ -10,10 +10,10 @@ pub const Domains = struct {
 
 pub const Message = struct {
     header: Header,
-    question: ?[]Question = null,
-    answer: ?[]Resource = null,
-    authority: ?[]Resource = null,
-    additional: ?[]Resource = null,
+    questions: ?[]Question = null,
+    answers: ?[]Resource = null,
+    authorities: ?[]Resource = null,
+    additionals: ?[]Resource = null,
 
     pub const Header = packed struct(u96) {
         arcount: u16,
@@ -170,8 +170,8 @@ pub const Message = struct {
 
         return .{
             .header = header,
-            .question = questions,
-            .answer = resources,
+            .questions = questions,
+            .answers = resources,
         };
     }
 
@@ -197,8 +197,13 @@ pub const Message = struct {
                 .nscount = 0,
                 .arcount = 0,
             },
-            .question = queries,
+            .questions = queries,
         };
+    }
+
+    pub fn answer(domain: []const u8, ip: Address) !Message {
+        _ = domain;
+        _ = ip;
     }
 
     pub fn write(m: Message, buffer: []u8) !usize {
@@ -206,19 +211,19 @@ pub const Message = struct {
         var writer = fbs.writer();
         var w = writer.any();
         try w.writeInt(u96, @bitCast(m.header), .big);
-        if (m.question) |quest| for (quest) |q| {
+        if (m.questions) |quest| for (quest) |q| {
             try q.write(&w);
         };
 
-        if (m.answer) |answer| for (answer) |a| {
+        if (m.answers) |ans| for (ans) |a| {
             a.write();
         };
 
-        if (m.authority) |authort| for (authort) |a| {
+        if (m.authorities) |authort| for (authort) |a| {
             a.write();
         };
 
-        if (m.additional) |addit| for (addit) |a| {
+        if (m.additionals) |addit| for (addit) |a| {
             a.write();
         };
 
@@ -231,11 +236,11 @@ pub const Message = struct {
             @as(u96, 37884113131630398792389361664),
             @as(u96, @bitCast(q.header)),
         );
-        for (q.question.?) |qst| {
+        for (q.questions.?) |qst| {
             _ = qst;
             //std.testing.allocator.free(qst.name);
         }
-        std.testing.allocator.free(q.question.?);
+        std.testing.allocator.free(q.questions.?);
     }
 };
 
@@ -308,6 +313,11 @@ pub const Label = struct {
     }
 };
 
+pub const Address = union(enum) {
+    a: [4]u8,
+    aaaa: [16]u8,
+};
+
 test "Message.Header" {
     const thing: Message.Header = .{
         .id = 16,
@@ -332,10 +342,10 @@ test "Message.Header" {
 
 fn testVector(a: Allocator, vect: []const u8) !void {
     const msg = try Message.fromBytes(a, vect);
-    try std.testing.expectEqual(1, msg.question.?.len);
-    try std.testing.expectEqual(1, msg.answer.?.len);
-    a.free(msg.question.?);
-    a.free(msg.answer.?);
+    try std.testing.expectEqual(1, msg.questions.?.len);
+    try std.testing.expectEqual(1, msg.answers.?.len);
+    a.free(msg.questions.?);
+    a.free(msg.answers.?);
 }
 
 test "build pkt" {
@@ -343,7 +353,7 @@ test "build pkt" {
     const msg = try Message.query(a, &[1][]const u8{"gr.ht."});
     var buffer: [23]u8 = undefined;
     const used = try msg.write(&buffer);
-    a.free(msg.question.?);
+    a.free(msg.questions.?);
 
     try std.testing.expect(used == 23);
 
@@ -362,7 +372,7 @@ test "build pkt non-fqdn" {
     const msg = try Message.query(a, &[1][]const u8{"gr.ht"});
     var buffer: [23]u8 = undefined;
     const used = try msg.write(&buffer);
-    a.free(msg.question.?);
+    a.free(msg.questions.?);
 
     try std.testing.expect(used == 23);
 

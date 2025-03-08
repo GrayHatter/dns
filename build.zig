@@ -25,6 +25,9 @@ pub fn build(b: *std.Build) void {
     const client = b.addExecutable(.{ .name = "dnsc", .root_module = client_mod });
     b.installArtifact(client);
 
+    const daemon = b.addExecutable(.{ .name = "dnsd", .root_module = daemon_mod });
+    b.installArtifact(daemon);
+
     const run_cmd = b.addRunArtifact(client);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
