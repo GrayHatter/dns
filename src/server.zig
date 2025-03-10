@@ -43,6 +43,16 @@ pub fn main() !void {
     std.debug.print("done\n", .{});
 }
 
+const Upstream = struct {
+    sock: std.posix.socket_t,
+
+    pub fn init() Upstream {
+        return .{
+            .sock = undefined,
+        };
+    }
+};
+
 const DNS = @import("dns.zig");
 
 const std = @import("std");
