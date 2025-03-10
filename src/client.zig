@@ -16,10 +16,7 @@ pub fn main() !void {
         }
     }
 
-    const addr: std.net.Address = .{ .in = .{ .sa = .{
-        .port = std.mem.nativeToBig(u16, 53),
-        .addr = std.mem.bytesToValue(u32, &nameserver),
-    } } };
+    const upstream = try DNS.Upstream.init(nameserver);
 
     const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
     var request: [1024]u8 = undefined;
@@ -29,13 +26,10 @@ pub fn main() !void {
     std.debug.print("data {any}\n", .{request[0..msgsize]});
     std.debug.print("data {s}\n", .{request[0..msgsize]});
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
-    const ocnt = try std.posix.send(sock, request[0..msgsize], 0);
-    std.debug.print("sent {}\n", .{ocnt});
+    try upstream.send(request[0..msgsize]);
 
     var buffer: [1024]u8 = undefined;
-    const icnt = try std.posix.recv(sock, &buffer, 0);
+    const icnt = try upstream.recv(&buffer);
     std.debug.print("received {}\n", .{icnt});
     std.debug.print("data {any}\n", .{buffer[0..icnt]});
     std.debug.print("data {s}\n", .{buffer[0..icnt]});

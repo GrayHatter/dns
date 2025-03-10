@@ -8,6 +8,36 @@ pub const Domains = struct {
     ),
 };
 
+pub const Upstream = struct {
+    addr: std.net.Address,
+    sock: std.posix.socket_t,
+
+    pub fn init(addr_ip: [4]u8) !Upstream {
+        const addr: std.net.Address = .{ .in = .{ .sa = .{
+            .port = nativeToBig(u16, 53),
+            .addr = bytesToValue(u32, &addr_ip),
+        } } };
+        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+        try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
+
+        return .{
+            .addr = addr,
+            .sock = sock,
+        };
+    }
+
+    pub fn send(upstrm: Upstream, data: []const u8) !void {
+        const cnt = try std.posix.send(upstrm.sock, data, 0);
+        if (cnt != data.len) return error.TxFailed;
+    }
+
+    pub fn recv(upstrm: Upstream, buffer: []u8) !usize {
+        if (buffer.len < 512) return error.BufferTooSmall;
+        const icnt = try std.posix.recv(upstrm.sock, buffer, 0);
+        return icnt;
+    }
+};
+
 pub const Message = struct {
     header: Header,
     questions: ?[]Question = null,
@@ -422,3 +452,5 @@ const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
 const indexOfScalar = std.mem.indexOfScalar;
+const nativeToBig = std.mem.nativeToBig;
+const bytesToValue = std.mem.bytesToValue;
