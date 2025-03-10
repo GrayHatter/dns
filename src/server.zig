@@ -5,13 +5,7 @@ pub fn main() !void {
         _ = arg;
     }
 
-    const addr: std.net.Address = .{ .in = .{ .sa = .{
-        .port = @byteSwap(@as(u16, 53)),
-        .addr = std.mem.readInt(u32, &[4]u8{ 127, 0, 0, 1 }, .little),
-    } } };
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    const bind = try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
-    _ = bind;
+    const upstream: DNS.Upstream = try .listen(.{ 127, 0, 0, 1 }, 53);
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
@@ -26,14 +20,9 @@ pub fn main() !void {
     //var request: [1024]u8 = undefined;
     //const msgsize = try msg.write(&request);
 
-    var src_addr: std.net.Address = .{ .any = undefined };
-    var src_len: u32 = 0;
-
+    var addr: std.net.Address = .{ .any = undefined };
     var buffer: [1024]u8 = undefined;
-    const icnt = try std.posix.recvfrom(sock, &buffer, 0, &src_addr.any, &src_len);
-    if (icnt >= 512) {
-        @panic("packet too large");
-    }
+    const icnt = try upstream.recvFrom(&buffer, &addr);
     std.debug.print("received {}\n", .{icnt});
     std.debug.print("data {any}\n", .{buffer[0..icnt]});
 

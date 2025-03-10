@@ -13,10 +13,10 @@ pub const Upstream = struct {
     sock: std.posix.socket_t,
 
     /// TODO ipv6
-    pub fn init(addr_ip: [4]u8) !Upstream {
+    pub fn init(addr_ip: [4]u8, port: u16) !Upstream {
         const up: Upstream = .{
             .addr = .{ .in = .{ .sa = .{
-                .port = nativeToBig(u16, 53),
+                .port = nativeToBig(u16, port),
                 .addr = bytesToValue(u32, &addr_ip),
             } } },
             .sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0),
@@ -24,8 +24,16 @@ pub const Upstream = struct {
         return up;
     }
 
-    pub fn connect(up: Upstream) !void {
+    pub fn connect(addr_ip: [4]u8, port: u16) !Upstream {
+        const up: Upstream = try .init(addr_ip, port);
         try std.posix.connect(up.sock, &up.addr.any, up.addr.getOsSockLen());
+        return up;
+    }
+
+    pub fn listen(addr_ip: [4]u8, port: u16) !Upstream {
+        const up: Upstream = try .init(addr_ip, port);
+        try std.posix.bind(up.sock, &up.addr.any, up.addr.getOsSockLen());
+        return up;
     }
 
     pub fn send(upstrm: Upstream, data: []const u8) !void {
@@ -37,6 +45,16 @@ pub const Upstream = struct {
         if (buffer.len < 512) return error.BufferTooSmall;
         const icnt = try std.posix.recv(upstrm.sock, buffer, 0);
         return icnt;
+    }
+
+    pub fn recvFrom(upstrm: Upstream, buffer: []u8, addr: *std.net.Address) !usize {
+        if (buffer.len < 512) return error.BufferTooSmall;
+        var src_len: u32 = undefined;
+        const cnt = try std.posix.recvfrom(upstrm.sock, buffer, 0, &addr.any, &src_len);
+        if (cnt >= 512) {
+            @panic("packet too large");
+        }
+        return cnt;
     }
 };
 
