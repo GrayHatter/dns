@@ -5,7 +5,7 @@ pub fn main() !void {
         _ = arg;
     }
 
-    const upstream: DNS.Upstream = try .listen(.{ 127, 0, 0, 1 }, 53);
+    const downstream: DNS.Peer = try .listen(.{ 127, 0, 0, 1 }, 53);
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
@@ -22,7 +22,7 @@ pub fn main() !void {
 
     var addr: std.net.Address = .{ .any = undefined };
     var buffer: [1024]u8 = undefined;
-    const icnt = try upstream.recvFrom(&buffer, &addr);
+    const icnt = try downstream.recvFrom(&buffer, &addr);
     std.debug.print("received {}\n", .{icnt});
     std.debug.print("data {any}\n", .{buffer[0..icnt]});
 

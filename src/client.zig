@@ -16,7 +16,7 @@ pub fn main() !void {
         }
     }
 
-    const upstream = try DNS.Upstream.connect(nameserver, 53);
+    const upstream = try DNS.Peer.connect(nameserver, 53);
 
     const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
     var request: [1024]u8 = undefined;
