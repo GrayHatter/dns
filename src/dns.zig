@@ -12,18 +12,20 @@ pub const Upstream = struct {
     addr: std.net.Address,
     sock: std.posix.socket_t,
 
+    /// TODO ipv6
     pub fn init(addr_ip: [4]u8) !Upstream {
-        const addr: std.net.Address = .{ .in = .{ .sa = .{
-            .port = nativeToBig(u16, 53),
-            .addr = bytesToValue(u32, &addr_ip),
-        } } };
-        const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-        try std.posix.connect(sock, &addr.any, addr.getOsSockLen());
-
-        return .{
-            .addr = addr,
-            .sock = sock,
+        const up: Upstream = .{
+            .addr = .{ .in = .{ .sa = .{
+                .port = nativeToBig(u16, 53),
+                .addr = bytesToValue(u32, &addr_ip),
+            } } },
+            .sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0),
         };
+        return up;
+    }
+
+    pub fn connect(up: Upstream) !void {
+        try std.posix.connect(up.sock, &up.addr.any, up.addr.getOsSockLen());
     }
 
     pub fn send(upstrm: Upstream, data: []const u8) !void {
