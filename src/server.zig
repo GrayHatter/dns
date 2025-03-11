@@ -54,10 +54,12 @@ pub fn main() !void {
     //var request: [1024]u8 = undefined;
     //const msgsize = try msg.write(&request);
 
+    var timer: std.time.Timer = try .start();
     while (true) {
         var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
         const icnt = try downstream.recvFrom(&buffer, &addr);
+        timer.reset();
         log.err("received {}", .{icnt});
         //log.err("data {any}", .{buffer[0..icnt]});
         log.err("received from {any}", .{addr.in});
@@ -83,7 +85,7 @@ pub fn main() !void {
         }
 
         try downstream.sendTo(addr, relay_buf[0..b_cnt]);
-        log.err("responded", .{});
+        log.err("responded {}", .{timer.lap()});
     }
 
     log.err("done", .{});
