@@ -12,12 +12,12 @@ pub fn main() !void {
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
-        std.debug.print("dropping root\n", .{});
+        log.err("dropping root", .{});
         _ = try std.posix.setgid(99);
         _ = try std.posix.setuid(99);
     }
 
-    std.debug.print("started\n", .{});
+    log.err("started", .{});
 
     var cache: DNS.Cache = .{
         .tld = .{},
@@ -43,31 +43,30 @@ pub fn main() !void {
     while (true) {
         var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
-        std.debug.print("sock {}\n", .{downstream.sock});
         const icnt = try downstream.recvFrom(&buffer, &addr);
-        std.debug.print("received {}\n", .{icnt});
-        //std.debug.print("data {any}\n", .{buffer[0..icnt]});
-        std.debug.print("received from {any}\n", .{addr.in});
+        log.err("received {}", .{icnt});
+        //log.err("data {any}", .{buffer[0..icnt]});
+        log.err("received from {any}", .{addr.in});
 
         const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
-        //std.debug.print("data {any}\n", .{msg});
+        //log.err("data {any}", .{msg});
         // defer once in loop
         if (msg.questions) |q| a.free(q);
         if (msg.answers) |an| a.free(an);
 
-        std.debug.print("bounce\n", .{});
+        log.err("bounce", .{});
         up_idx +%= 1;
         try upconns[up_idx].send(buffer[0..icnt]);
         var relay_buf: [1024]u8 = undefined;
         const b_cnt = try upconns[up_idx].recv(&relay_buf);
-        std.debug.print("bounce received {}\n", .{b_cnt});
-        std.debug.print("bounce data {any}\n", .{buffer[0..b_cnt]});
+        log.err("bounce received {}", .{b_cnt});
+        log.err("bounce data {any}", .{relay_buf[0..b_cnt]});
 
         try downstream.sendTo(addr, relay_buf[0..b_cnt]);
-        std.debug.print("responded\n", .{});
+        log.err("responded", .{});
     }
 
-    std.debug.print("done\n", .{});
+    log.err("done", .{});
 }
 
 const upstreams: [4][4]u8 = .{

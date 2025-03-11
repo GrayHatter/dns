@@ -1,6 +1,6 @@
 pub fn main() !void {
     const a = std.heap.page_allocator;
-    std.debug.print("started\n", .{});
+    log.err("started", .{});
 
     var domain: ?[]const u8 = null;
     var nameserver: [4]u8 = @splat(0);
@@ -22,19 +22,19 @@ pub fn main() !void {
     var request: [1024]u8 = undefined;
     const msgsize = try msg.write(&request);
 
-    std.debug.print("msg {}\n", .{msgsize});
-    std.debug.print("data {any}\n", .{request[0..msgsize]});
-    std.debug.print("data {s}\n", .{request[0..msgsize]});
+    log.err("msg {}", .{msgsize});
+    log.err("data {any}", .{request[0..msgsize]});
+    log.err("data {s}", .{request[0..msgsize]});
 
     try upstream.send(request[0..msgsize]);
 
     var buffer: [1024]u8 = undefined;
     const icnt = try upstream.recv(&buffer);
-    std.debug.print("received {}\n", .{icnt});
-    std.debug.print("data {any}\n", .{buffer[0..icnt]});
-    std.debug.print("data {s}\n", .{buffer[0..icnt]});
+    log.err("received {}", .{icnt});
+    log.err("data {any}", .{buffer[0..icnt]});
+    log.err("data {s}", .{buffer[0..icnt]});
 
-    std.debug.print("done\n", .{});
+    log.err("done", .{});
 }
 
 const DNS = @import("dns.zig");

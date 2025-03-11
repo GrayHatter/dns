@@ -209,7 +209,7 @@ pub const Message = struct {
     pub fn fromBytes(a: Allocator, bytes: []const u8) !Message {
         if (bytes.len < 12) return error.MessageTooSmall;
         const header: Header = .fromBytes(bytes[0..12].*);
-        std.debug.print("{}\n", .{header});
+        log.warn("{}", .{header});
 
         var idx: usize = 12;
 
@@ -217,22 +217,22 @@ pub const Message = struct {
         for (questions) |*q| {
             const name = try Label.getName(a, bytes, &idx);
             defer a.free(name);
-            std.debug.print("{s}\n", .{name});
+            log.warn("label name {s}", .{name});
             q.* = .{
                 .name = name,
                 .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][0..2].*)))),
                 .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(bytes[idx..][2..4].*)))),
             };
-            std.debug.print("{any}\n", .{q.*});
+            log.warn("{any}", .{q.*});
             idx += 4;
         }
 
         const resources = try a.alloc(Resource, header.ancount);
         for (resources) |*r| {
-            std.debug.print("{} {}\n", .{ idx, bytes[idx] });
+            log.warn("{} {}", .{ idx, bytes[idx] });
             const name = try Label.getName(a, bytes, &idx);
             defer a.free(name);
-            std.debug.print("{s}\n", .{name});
+            log.warn("{s}", .{name});
             const rdlen: u16 = @byteSwap(@as(u16, @bitCast(bytes[idx..][8..10].*)));
             r.* = .{
                 .name = name,
@@ -242,7 +242,7 @@ pub const Message = struct {
                 .rdlength = rdlen,
                 .rdata = bytes[idx..][10..][0..rdlen],
             };
-            std.debug.print("{any}\n", .{r.*});
+            log.warn("{any}", .{r.*});
             if (r.*.rtype != .a) @panic("not implemented");
         }
 
@@ -282,6 +282,10 @@ pub const Message = struct {
     pub fn answer(domain: []const u8, ip: Address) !Message {
         _ = domain;
         _ = ip;
+    }
+
+    pub fn answerDrop(domain: []const u8) !Message {
+        _ = domain;
     }
 
     pub fn write(m: Message, buffer: []u8) !usize {
