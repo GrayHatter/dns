@@ -8,6 +8,29 @@ pub const Domains = struct {
     ),
 };
 
+pub const Cache = struct {
+    tld: std.StringHashMapUnmanaged(Zone),
+};
+
+pub const Zone = struct {
+    domain: std.StringHashMapUnmanaged(CacheRes),
+};
+
+pub const CacheRes = union(enum) {
+    time: Result,
+    static: Result,
+    cached: Result,
+
+    pub const Result = struct {
+        drop: bool = true,
+        ttl: u32,
+        addr: union(enum) {
+            a: [4]u8,
+            aaaa: [16]u8,
+        },
+    };
+};
+
 pub const Peer = struct {
     addr: std.net.Address,
     sock: std.posix.socket_t,
@@ -41,6 +64,11 @@ pub const Peer = struct {
         if (cnt != data.len) return error.TxFailed;
     }
 
+    pub fn sendTo(upstrm: Peer, addr: std.net.Address, data: []const u8) !void {
+        const cnt = try std.posix.sendto(upstrm.sock, data, 0, &addr.any, addr.getOsSockLen());
+        if (cnt != data.len) return error.TxFailed;
+    }
+
     pub fn recv(upstrm: Peer, buffer: []u8) !usize {
         if (buffer.len < 512) return error.BufferTooSmall;
         const icnt = try std.posix.recv(upstrm.sock, buffer, 0);
@@ -49,7 +77,7 @@ pub const Peer = struct {
 
     pub fn recvFrom(upstrm: Peer, buffer: []u8, addr: *std.net.Address) !usize {
         if (buffer.len < 512) return error.BufferTooSmall;
-        var src_len: u32 = undefined;
+        var src_len: u32 = addr.getOsSockLen();
         const cnt = try std.posix.recvfrom(upstrm.sock, buffer, 0, &addr.any, &src_len);
         if (cnt >= 512) {
             @panic("packet too large");

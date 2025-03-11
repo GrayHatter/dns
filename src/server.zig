@@ -1,8 +1,11 @@
 pub fn main() !void {
     const a = std.heap.page_allocator;
-    var argsi = std.process.args();
-    while (argsi.next()) |arg| {
-        _ = arg;
+    var argv = std.process.args();
+    var blocks: ?[]const u8 = null;
+    while (argv.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--block")) {
+            blocks = argv.next() orelse @panic("invalid argv --block");
+        }
     }
 
     const downstream: DNS.Peer = try .listen(.{ 127, 0, 0, 1 }, 53);
@@ -16,24 +19,60 @@ pub fn main() !void {
 
     std.debug.print("started\n", .{});
 
+    var cache: DNS.Cache = .{
+        .tld = .{},
+    };
+
+    try cache.tld.put(a, "com", .{ .domain = .{} });
+    try cache.tld.put(a, "ht", .{ .domain = .{} });
+
+    if (blocks) |b| {
+        a.free(try parse(a, b));
+    }
+
+    var upconns: [4]DNS.Peer = undefined;
+    for (&upconns, upstreams) |*dst, ip| {
+        dst.* = try .connect(ip, 53);
+    }
+    var up_idx: u2 = 0;
+
     //const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
     //var request: [1024]u8 = undefined;
     //const msgsize = try msg.write(&request);
 
-    var addr: std.net.Address = .{ .any = undefined };
+    var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
     var buffer: [1024]u8 = undefined;
+    std.debug.print("sock {}\n", .{downstream.sock});
     const icnt = try downstream.recvFrom(&buffer, &addr);
     std.debug.print("received {}\n", .{icnt});
-    std.debug.print("data {any}\n", .{buffer[0..icnt]});
+    //std.debug.print("data {any}\n", .{buffer[0..icnt]});
+    std.debug.print("received from {any}\n", .{addr.in});
 
     const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
+    //std.debug.print("data {any}\n", .{msg});
+    // defer once in loop
     if (msg.questions) |q| a.free(q);
     if (msg.answers) |an| a.free(an);
 
-    std.debug.print("data {any}\n", .{msg});
+    std.debug.print("bounce\n", .{});
+    up_idx +%= 1;
+    try upconns[up_idx].send(buffer[0..icnt]);
+    var relay_buf: [1024]u8 = undefined;
+    const b_cnt = try upconns[up_idx].recv(&relay_buf);
+    std.debug.print("bounce received {}\n", .{b_cnt});
+    std.debug.print("bounce data {any}\n", .{buffer[0..b_cnt]});
+
+    try downstream.sendTo(addr, relay_buf[0..b_cnt]);
 
     std.debug.print("done\n", .{});
 }
+
+const upstreams: [4][4]u8 = .{
+    .{ 1, 1, 1, 1 },
+    .{ 1, 0, 0, 1 },
+    .{ 8, 8, 8, 8 },
+    .{ 8, 8, 4, 4 },
+};
 
 fn parseLine(line: []const u8) ![]const u8 {
     if (line[0] == '#') return error.Skip;
