@@ -1,10 +1,24 @@
+fn usage() !void {}
+
 pub fn main() !void {
     const a = std.heap.page_allocator;
-    var argv = std.process.args();
+
     var blocks: ?[]const u8 = null;
+    var blocked_ips: std.ArrayListUnmanaged([4]u8) = .{};
+
+    var argv = std.process.args();
     while (argv.next()) |arg| {
         if (std.mem.eql(u8, arg, "--block")) {
             blocks = argv.next() orelse @panic("invalid argv --block");
+        }
+        if (std.mem.eql(u8, arg, "--drop-ip")) {
+            const ip_str = argv.next() orelse @panic("invalid argv --drop-ip");
+            var ip: [4]u8 = undefined;
+            var itr = std.mem.splitScalar(u8, ip_str, '.');
+            for (&ip) |*oct| {
+                oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
+            }
+            try blocked_ips.append(a, ip);
         }
     }
 
@@ -62,7 +76,7 @@ pub fn main() !void {
         log.err("bounce received {}", .{b_cnt});
         log.err("bounce data {any}", .{relay_buf[0..b_cnt]});
 
-        for (banned_destips) |banned| {
+        for (blocked_ips.items) |banned| {
             if (std.mem.eql(u8, relay_buf[b_cnt - 4 .. b_cnt], &banned)) {
                 @memset(relay_buf[b_cnt - 4 .. b_cnt], 0);
             }
@@ -80,10 +94,6 @@ const upstreams: [4][4]u8 = .{
     .{ 1, 0, 0, 1 },
     .{ 8, 8, 8, 8 },
     .{ 8, 8, 4, 4 },
-};
-
-var banned_destips: [1][4]u8 = .{
-    .{ 0, 0, 0, 0 },
 };
 
 fn parseLine(line: []const u8) ![]const u8 {
