@@ -27,9 +27,39 @@ pub fn main() !void {
     std.debug.print("data {any}\n", .{buffer[0..icnt]});
 
     const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
+    if (msg.questions) |q| a.free(q);
+    if (msg.answers) |an| a.free(an);
+
     std.debug.print("data {any}\n", .{msg});
 
     std.debug.print("done\n", .{});
+}
+
+fn parseLine(line: []const u8) ![]const u8 {
+    if (line[0] == '#') return error.Skip;
+    return line;
+}
+
+fn parse(a: Allocator, filename: []const u8) ![][]const u8 {
+    var file = try std.fs.cwd().openFile(filename, .{});
+    defer file.close();
+    const fsize = try file.getEndPos();
+    // 21 bytes per line for the test file
+    const base_count = fsize / 21;
+    var reader = file.reader();
+    var list = try std.ArrayListUnmanaged([]const u8).initCapacity(a, base_count);
+    errdefer list.clearAndFree(a);
+    var lbuf: [1024]u8 = undefined;
+
+    while (try reader.readUntilDelimiterOrEof(&lbuf, '\n')) |line| {
+        try list.append(a, parseLine(line) catch continue);
+    }
+
+    return try list.toOwnedSlice(a);
+}
+
+test main {
+    _ = &main;
 }
 
 const DNS = @import("dns.zig");
