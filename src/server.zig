@@ -62,6 +62,12 @@ pub fn main() !void {
         log.err("bounce received {}", .{b_cnt});
         log.err("bounce data {any}", .{relay_buf[0..b_cnt]});
 
+        for (banned_destips) |banned| {
+            if (std.mem.eql(u8, relay_buf[b_cnt - 4 .. b_cnt], &banned)) {
+                @memset(relay_buf[b_cnt - 4 .. b_cnt], 0);
+            }
+        }
+
         try downstream.sendTo(addr, relay_buf[0..b_cnt]);
         log.err("responded", .{});
     }
@@ -74,6 +80,10 @@ const upstreams: [4][4]u8 = .{
     .{ 1, 0, 0, 1 },
     .{ 8, 8, 8, 8 },
     .{ 8, 8, 4, 4 },
+};
+
+var banned_destips: [1][4]u8 = .{
+    .{ 0, 0, 0, 0 },
 };
 
 fn parseLine(line: []const u8) ![]const u8 {
