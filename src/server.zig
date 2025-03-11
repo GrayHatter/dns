@@ -40,29 +40,32 @@ pub fn main() !void {
     //var request: [1024]u8 = undefined;
     //const msgsize = try msg.write(&request);
 
-    var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
-    var buffer: [1024]u8 = undefined;
-    std.debug.print("sock {}\n", .{downstream.sock});
-    const icnt = try downstream.recvFrom(&buffer, &addr);
-    std.debug.print("received {}\n", .{icnt});
-    //std.debug.print("data {any}\n", .{buffer[0..icnt]});
-    std.debug.print("received from {any}\n", .{addr.in});
+    while (true) {
+        var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
+        var buffer: [1024]u8 = undefined;
+        std.debug.print("sock {}\n", .{downstream.sock});
+        const icnt = try downstream.recvFrom(&buffer, &addr);
+        std.debug.print("received {}\n", .{icnt});
+        //std.debug.print("data {any}\n", .{buffer[0..icnt]});
+        std.debug.print("received from {any}\n", .{addr.in});
 
-    const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
-    //std.debug.print("data {any}\n", .{msg});
-    // defer once in loop
-    if (msg.questions) |q| a.free(q);
-    if (msg.answers) |an| a.free(an);
+        const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
+        //std.debug.print("data {any}\n", .{msg});
+        // defer once in loop
+        if (msg.questions) |q| a.free(q);
+        if (msg.answers) |an| a.free(an);
 
-    std.debug.print("bounce\n", .{});
-    up_idx +%= 1;
-    try upconns[up_idx].send(buffer[0..icnt]);
-    var relay_buf: [1024]u8 = undefined;
-    const b_cnt = try upconns[up_idx].recv(&relay_buf);
-    std.debug.print("bounce received {}\n", .{b_cnt});
-    std.debug.print("bounce data {any}\n", .{buffer[0..b_cnt]});
+        std.debug.print("bounce\n", .{});
+        up_idx +%= 1;
+        try upconns[up_idx].send(buffer[0..icnt]);
+        var relay_buf: [1024]u8 = undefined;
+        const b_cnt = try upconns[up_idx].recv(&relay_buf);
+        std.debug.print("bounce received {}\n", .{b_cnt});
+        std.debug.print("bounce data {any}\n", .{buffer[0..b_cnt]});
 
-    try downstream.sendTo(addr, relay_buf[0..b_cnt]);
+        try downstream.sendTo(addr, relay_buf[0..b_cnt]);
+        std.debug.print("responded\n", .{});
+    }
 
     std.debug.print("done\n", .{});
 }
