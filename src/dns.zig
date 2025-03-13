@@ -13,7 +13,7 @@ pub const Cache = struct {
 };
 
 pub const Zone = struct {
-    domain: std.StringHashMapUnmanaged(CacheRes),
+    domains: std.StringHashMapUnmanaged(CacheRes),
 };
 
 pub const CacheRes = union(enum) {
@@ -268,8 +268,9 @@ pub const Message = struct {
     }
 
     pub const Iterator = struct {
-        index: ?usize = 0,
         msg: *const Message,
+        index: usize = 0,
+        name_buffer: [255]u8 = undefined,
 
         pub fn init(msg: *const Message) Iterator {
             return .{
@@ -280,10 +281,11 @@ pub const Message = struct {
 
         pub fn next(iter: *Iterator) !?Payload {
             const h = iter.msg.header;
-            if (iter.index > h.qdcount + h.ancount + h.nscount + h.arcount) return null;
+
+            if (iter.index >= h.qdcount + h.ancount + h.nscount + h.arcount) return null;
 
             defer iter.index += 1;
-            return iter.msg.payload(iter.index);
+            return try iter.msg.payload(iter.index, &iter.name_buffer);
         }
     };
 
@@ -291,17 +293,15 @@ pub const Message = struct {
         return Iterator.init(msg);
     }
 
-    pub fn payload(msg: Message, index: usize) !?Payload {
+    pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
         const payload_end = msg.header.qdcount + msg.header.ancount +
             msg.header.nscount + msg.header.arcount;
         if (index >= payload_end) return error.InvalidIndex;
 
-        var name_buf: [128]u8 = undefined;
-
         var idx: usize = 12;
         for (0..payload_end) |payload_idx| {
             if (payload_idx < msg.header.qdcount) {
-                const name = try Label.getName(&name_buf, msg.bytes, &idx);
+                const name = try Label.getName(name_buf, msg.bytes, &idx);
                 log.warn("label name {s}", .{name});
                 if (payload_idx == index) {
                     return .{ .question = .{
@@ -310,35 +310,38 @@ pub const Message = struct {
                         .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
                     } };
                 } else {
-                    _ = try Label.getName(&name_buf, msg.bytes, &idx);
+                    idx += 4;
                 }
                 //log.warn("{any}", .{q.*});
-
-            } else {
+            } else if (payload_idx < msg.header.qdcount + msg.header.ancount) {
                 if (payload_idx == index) {
-                    log.warn("{} {}", .{ idx, msg.bytes[idx] });
-                    const name = try Label.getName(&name_buf, msg.bytes, &idx);
-                    log.warn("{s}", .{name});
+                    log.warn("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
+                    const name = try Label.getName(name_buf, msg.bytes, &idx);
+                    log.warn("answer label {s}", .{name});
                     const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
-                    if (idx == index) {
+                    if (payload_idx == index) {
                         const r: Resource = .{
                             .name = name,
                             .rtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
                             .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
                             .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
-                            .rdlength = rdlen,
-                            .rdata = msg.bytes[idx..][10..][0..rdlen],
+                            .addr = switch (rdlen) {
+                                4 => .{ .a = msg.bytes[idx..][10..][0..4].* },
+                                16 => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
+                                else => return error.InvalidResourceData,
+                            },
                         };
-                        if (r.rtype != .a) @panic("not implemented");
+                        if (r.rtype != .a and r.rtype != .aaaa) return error.ResponseTypeNotImplemented;
 
-                        return .{ .resource = r };
+                        return .{ .answer = r };
                     } else {
-                        _ = try Label.getName(&name_buf, msg.bytes, &idx);
-                        idx += @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
+                        _ = try Label.getName(name_buf, msg.bytes, &idx);
+                        idx += rdlen;
+                        continue;
                     }
                 }
             }
-        }
+        } else return error.InvalidIndex;
     }
 
     pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
@@ -409,7 +412,7 @@ pub const Message = struct {
 
         return .{
             .header = h,
-            .bytes = bytes,
+            .bytes = bytes[0..idx],
         };
     }
 
@@ -468,7 +471,7 @@ pub const Label = struct {
         sw: switch (bytes[idx]) {
             0 => {
                 if (!pointered) index.* = idx + 1;
-                return try name.items;
+                return name.items;
             },
             1...63 => |b| {
                 idx += b + 1;
@@ -616,6 +619,45 @@ test "build answer" {
     }, &buffer);
     try std.testing.expectEqual(msg1.header.qdcount, 1);
     try std.testing.expectEqual(msg1.header.ancount, 1);
+
+    var big_buffer: [100]u8 = undefined;
+
+    const msg2 = try Message.answer(
+        31337,
+        &[1][]const u8{"gr.ht."},
+        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &big_buffer,
+    );
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
+        4,   20,  69,
+    }, msg2.bytes);
+}
+
+test "response iter" {
+    const base = [_]u8{
+        197, 22,  129, 128, 0,   1,   0,   1,   0,   0,   0,   0,
+        7,   122, 105, 103, 108, 97,  110, 103, 3,   111, 114, 103,
+        0,   0,   28,  0,   1,   192, 12,  0,   28,  0,   1,   0,
+        0,   1,   44,  0,   16,  42,  1,   4,   249, 48,  81,  75,
+        210, 0,   0,   0,   0,   0,   0,   0,   2,
+    };
+    const msg: Message = try .fromBytes(&base);
+    var it = msg.iterator();
+    try std.testing.expectEqual(msg.header.qdcount, 1);
+    try std.testing.expectEqual(msg.header.ancount, 1);
+    var count: usize = 2;
+    while (try it.next()) |r| {
+        switch (r) {
+            .question => try std.testing.expectEqual(count, 2),
+            .answer => try std.testing.expectEqual(count, 1),
+        }
+        count -%= 1;
+    }
+
+    try std.testing.expectEqual(count, 0);
 }
 
 test "build answerDrop" {

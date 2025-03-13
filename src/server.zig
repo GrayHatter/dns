@@ -2,16 +2,17 @@ fn usage() !void {}
 
 pub fn main() !void {
     const a = std.heap.page_allocator;
+    // TODO smp alloc
 
     var blocks: ?[]const u8 = null;
     var blocked_ips: std.ArrayListUnmanaged([4]u8) = .{};
+    var blocked_domains: std.ArrayListUnmanaged([]const u8) = .{};
 
     var argv = std.process.args();
     while (argv.next()) |arg| {
         if (std.mem.eql(u8, arg, "--block")) {
             blocks = argv.next() orelse @panic("invalid argv --block");
-        }
-        if (std.mem.eql(u8, arg, "--drop-ip")) {
+        } else if (std.mem.eql(u8, arg, "--drop-ip")) {
             const ip_str = argv.next() orelse @panic("invalid argv --drop-ip");
             var ip: [4]u8 = undefined;
             var itr = std.mem.splitScalar(u8, ip_str, '.');
@@ -19,6 +20,9 @@ pub fn main() !void {
                 oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
             }
             try blocked_ips.append(a, ip);
+        } else if (std.mem.eql(u8, arg, "--drop-domain")) {
+            const domain_str = argv.next() orelse @panic("invalid argv --drop-domain");
+            try blocked_domains.append(a, try a.dupe(u8, domain_str));
         }
     }
 
@@ -37,11 +41,24 @@ pub fn main() !void {
         .tld = .{},
     };
 
-    try cache.tld.put(a, "com", .{ .domain = .{} });
-    try cache.tld.put(a, "ht", .{ .domain = .{} });
+    try cache.tld.put(a, "com", .{ .domains = .{} });
+    try cache.tld.put(a, "net", .{ .domains = .{} });
+    try cache.tld.put(a, "org", .{ .domains = .{} });
+    try cache.tld.put(a, "ht", .{ .domains = .{} });
 
     if (blocks) |b| {
         a.free(try parse(a, b));
+    }
+
+    for (blocked_domains.items) |dd| {
+        const domain: Domain = .init(dd);
+        log.err("tld {s}", .{domain.tld});
+        var tld = cache.tld.getPtr(domain.tld).?;
+        log.err("zone {s}", .{domain.zone});
+        try tld.domains.put(a, domain.zone, .{ .static = .{
+            .ttl = 0xffffffff,
+            .addr = .{ .a = .{ 0, 0, 0, 0 } },
+        } });
     }
 
     var upconns: [4]DNS.Peer = undefined;
@@ -55,7 +72,7 @@ pub fn main() !void {
     //const msgsize = try msg.write(&request);
 
     var timer: std.time.Timer = try .start();
-    while (true) {
+    root: while (true) {
         var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
         const icnt = try downstream.recvFrom(&buffer, &addr);
@@ -65,29 +82,135 @@ pub fn main() !void {
         log.err("received from {any}", .{addr.in});
 
         const msg = try DNS.Message.fromBytes(buffer[0..icnt]);
-        //log.err("data {any}", .{msg});
-        _ = msg;
+        var address_bufs: [16]DNS.Address = undefined;
+        var addresses: std.ArrayListUnmanaged(DNS.Address) = .{
+            .items = &address_bufs,
+            .capacity = address_bufs.len,
+        };
+        addresses.items.len = 0;
+
+        var qdomains: [16][255]u8 = undefined;
+        var dbuf: [16][]const u8 = undefined;
+        var domains: std.ArrayListUnmanaged([]const u8) = .{
+            .items = &dbuf,
+            .capacity = dbuf.len,
+        };
+        domains.items.len = 0;
+
+        if (msg.header.qdcount >= 16) {
+            log.err("dropping invalid msg", .{});
+            log.debug("that message {any}", .{buffer[0..icnt]});
+            continue;
+        }
+
+        var iter = msg.iterator();
+        while (iter.next() catch |err| e: {
+            log.err("question iter error {}", .{err});
+            log.debug("qdata {any}", .{buffer[0..icnt]});
+            break :e null;
+        }) |pay| switch (pay) {
+            .question => |q| {
+                log.err("name {s}", .{q.name});
+                @memcpy(qdomains[iter.index][0..q.name.len], q.name);
+                domains.appendAssumeCapacity(qdomains[iter.index][0..q.name.len]);
+
+                const domain: Domain = .init(q.name);
+                const tld: *DNS.Zone = f: {
+                    if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
+                        if (!goptr.found_existing) {
+                            goptr.value_ptr.* = .{ .domains = .{} };
+                        }
+                        break :f goptr.value_ptr;
+                    } else |err| {
+                        log.err("hash error {}", .{err});
+                        break;
+                    }
+                };
+
+                if (tld.domains.getPtr(domain.zone)) |zone| switch (zone.*) {
+                    .static => {
+                        var ans_bytes: [512]u8 = undefined;
+                        if (msg.header.qdcount == 1) {
+                            const ans: DNS.Message = try .answerDrop(
+                                msg.header.id,
+                                q.name,
+                                &ans_bytes,
+                            );
+                            try downstream.sendTo(addr, ans.bytes);
+                            log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+                            continue :root;
+                        }
+                    },
+                    else => log.err("zone {}", .{zone}),
+                };
+
+                addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
+            },
+            .answer => break,
+        };
+
+        var answer_bytes: [512]u8 = undefined;
+        const answer = try DNS.Message.answer(
+            msg.header.id,
+            domains.items,
+            addresses.items,
+            &answer_bytes,
+        );
+
+        log.err("answer = {}", .{answer});
 
         log.info("bounce", .{});
         up_idx +%= 1;
         try upconns[up_idx].send(buffer[0..icnt]);
         var relay_buf: [1024]u8 = undefined;
         const b_cnt = try upconns[up_idx].recv(&relay_buf);
+        const relayed = relay_buf[0..b_cnt];
         log.info("bounce received {}", .{b_cnt});
-        log.debug("bounce data {any}", .{relay_buf[0..b_cnt]});
+        log.debug("bounce data {any}", .{relayed});
 
         for (blocked_ips.items) |banned| {
-            if (std.mem.eql(u8, relay_buf[b_cnt - 4 .. b_cnt], &banned)) {
-                @memset(relay_buf[b_cnt - 4 .. b_cnt], 0);
+            if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
+                @memset(relayed[relayed.len - 4 .. relayed.len], 0);
             }
         }
 
         try downstream.sendTo(addr, relay_buf[0..b_cnt]);
-        log.err("responded {}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+        log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+
+        const rmsg: DNS.Message = try .fromBytes(relayed);
+        var rit = rmsg.iterator();
+
+        while (rit.next() catch |err| e: {
+            log.err("relayed iter error {}", .{err});
+            log.debug("rdata {any}", .{relayed});
+            break :e null;
+        }) |pay| switch (pay) {
+            .question => |q| log.err("r question = {}", .{q}),
+            .answer => |r| log.err("r answer = {}", .{r}),
+        };
     }
 
     log.err("done", .{});
 }
+
+pub const Domain = struct {
+    tld: []const u8,
+    zone: []const u8,
+
+    pub fn init(dn: []const u8) Domain {
+        if (dn.len < 3) return .{ .tld = dn, .zone = "" };
+        var bit = std.mem.splitBackwardsScalar(
+            u8,
+            if (dn[dn.len - 1] == '.') dn[0 .. dn.len - 1] else dn,
+            '.',
+        );
+
+        return .{
+            .tld = bit.first(),
+            .zone = bit.rest(),
+        };
+    }
+};
 
 const upstreams: [4][4]u8 = .{
     .{ 1, 1, 1, 1 },
