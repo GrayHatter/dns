@@ -267,6 +267,30 @@ pub const Message = struct {
         };
     }
 
+    pub const Iterator = struct {
+        index: ?usize = 0,
+        msg: *const Message,
+
+        pub fn init(msg: *const Message) Iterator {
+            return .{
+                .index = 0,
+                .msg = msg,
+            };
+        }
+
+        pub fn next(iter: *Iterator) !?Payload {
+            const h = iter.msg.header;
+            if (iter.index > h.qdcount + h.ancount + h.nscount + h.arcount) return null;
+
+            defer iter.index += 1;
+            return iter.msg.payload(iter.index);
+        }
+    };
+
+    pub fn iterator(msg: *const Message) Iterator {
+        return Iterator.init(msg);
+    }
+
     pub fn payload(msg: Message, index: usize) !?Payload {
         const payload_end = msg.header.qdcount + msg.header.ancount +
             msg.header.nscount + msg.header.arcount;
