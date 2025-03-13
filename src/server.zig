@@ -60,7 +60,7 @@ pub fn main() !void {
         var buffer: [1024]u8 = undefined;
         const icnt = try downstream.recvFrom(&buffer, &addr);
         timer.reset();
-        log.err("received {}", .{icnt});
+        log.info("received {}", .{icnt});
         //log.err("data {any}", .{buffer[0..icnt]});
         log.err("received from {any}", .{addr.in});
 
@@ -68,13 +68,13 @@ pub fn main() !void {
         //log.err("data {any}", .{msg});
         _ = msg;
 
-        log.err("bounce", .{});
+        log.info("bounce", .{});
         up_idx +%= 1;
         try upconns[up_idx].send(buffer[0..icnt]);
         var relay_buf: [1024]u8 = undefined;
         const b_cnt = try upconns[up_idx].recv(&relay_buf);
-        log.err("bounce received {}", .{b_cnt});
-        log.err("bounce data {any}", .{relay_buf[0..b_cnt]});
+        log.info("bounce received {}", .{b_cnt});
+        log.debug("bounce data {any}", .{relay_buf[0..b_cnt]});
 
         for (blocked_ips.items) |banned| {
             if (std.mem.eql(u8, relay_buf[b_cnt - 4 .. b_cnt], &banned)) {
@@ -83,7 +83,7 @@ pub fn main() !void {
         }
 
         try downstream.sendTo(addr, relay_buf[0..b_cnt]);
-        log.err("responded {}", .{timer.lap()});
+        log.err("responded {}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
     }
 
     log.err("done", .{});
