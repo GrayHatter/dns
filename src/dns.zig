@@ -135,6 +135,13 @@ pub const Message = struct {
                 .arcount = @byteSwap(@as(u16, @bitCast(bytes[10..12].*))),
             };
         }
+
+        pub fn write(h: Header, w: *std.io.AnyWriter) !usize {
+            try w.writeInt(u96, @bitCast(h), .big);
+            std.debug.assert(@sizeOf(Header) == 16);
+            std.debug.assert(@divExact(@typeInfo(u96).int.bits, 8) == 12);
+            return 12;
+        }
     };
 
     pub const Payload = union(enum) {
@@ -156,12 +163,10 @@ pub const Message = struct {
         }
 
         pub fn write(q: Question, w: *std.io.AnyWriter) !usize {
-            try Label.writeName(q.name, w);
-            const fqdn: bool = q.name[q.name.len - 1] == '.';
-            if (!fqdn) try w.writeByte(0);
+            const len = try Label.writeName(q.name, w);
             try w.writeInt(u16, @intFromEnum(q.qtype), .big);
             try w.writeInt(u16, @intFromEnum(q.class), .big);
-            return q.name.len + if (fqdn) 5 else @as(u8, 6);
+            return len + 4;
         }
     };
 
@@ -170,10 +175,51 @@ pub const Message = struct {
         rtype: Type,
         class: Class,
         ttl: u32,
-        rdlength: u16,
-        rdata: []const u8,
+        addr: Address,
 
-        pub fn write(_: Resource) void {}
+        pub fn init(fqdn: []const u8, addr: Address, ttl: u32) Resource {
+            return .{
+                .name = fqdn,
+                .rtype = switch (addr) {
+                    .a => .a,
+                    .aaaa => .aaaa,
+                },
+                .class = .in,
+                .ttl = ttl,
+                .addr = addr,
+            };
+        }
+
+        pub fn write(r: Resource, w: *std.io.AnyWriter, mptr: ?u14) !usize {
+            var idx: usize = 0;
+            if (mptr) |p| {
+                const ptr: u16 = 0xc000 | @as(u16, p);
+                try w.writeInt(u16, ptr, .big);
+                idx += 2;
+            } else {
+                idx += try Label.writeName(r.name, w);
+            }
+            try w.writeInt(u16, @intFromEnum(r.rtype), .big);
+            idx += 2;
+            try w.writeInt(u16, @intFromEnum(r.class), .big);
+            idx += 2;
+            try w.writeInt(u32, r.ttl, .big);
+            idx += 4;
+            switch (r.addr) {
+                .a => |a| {
+                    try w.writeInt(u16, 4, .big);
+                    try w.writeAll(&a);
+                    idx += 6;
+                },
+                .aaaa => |aaaa| {
+                    try w.writeInt(u16, 16, .big);
+                    try w.writeAll(&aaaa);
+                    idx += 18;
+                },
+            }
+
+            return idx;
+        }
     };
 
     pub const Type = enum(u16) {
@@ -193,6 +239,7 @@ pub const Message = struct {
         minfo,
         mx,
         txt,
+        aaaa = 28,
         // The following are QTypes
         axfr = 252,
         mailb,
@@ -301,19 +348,56 @@ pub const Message = struct {
         return msg;
     }
 
-    pub fn answer(domain: []const u8, ip: Address) !Message {
-        _ = domain;
-        _ = ip;
+    pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Address, bytes: []u8) !Message {
+        var h: Header = .{
+            .id = id,
+            .qr = true,
+            .opcode = 0,
+            .aa = true,
+            .tc = false,
+            .rd = true,
+            .ra = true,
+            .rcode = .success,
+            .qdcount = @intCast(fqdns.len),
+            .ancount = @intCast(fqdns.len),
+            .nscount = 0,
+            .arcount = 0,
+        };
+
+        var fbs = std.io.fixedBufferStream(bytes);
+        var writer = fbs.writer();
+        var w = writer.any();
+        var idx = try h.write(&w);
+
+        var pbufs: [8]u14 = @splat(0);
+        var pointers: []u14 = pbufs[0..fqdns.len];
+
+        for (fqdns, 0..) |fqdn, i| {
+            const q: Question = .init(fqdn);
+            pointers[i] = @intCast(idx);
+            idx += try q.write(&w);
+        }
+
+        for (fqdns, ips, pointers) |fqdn, ip, p| {
+            const r: Resource = .init(fqdn, ip, 300);
+            idx += try r.write(&w, p);
+        }
+
+        return .{
+            .header = h,
+            .bytes = bytes,
+        };
     }
 
-    pub fn answerDrop(domain: []const u8) !Message {
-        _ = domain;
+    pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
+        const addrs: [16]Address = @splat(Address{ .a = @splat(0) });
+        return try answer(id, &[1][]const u8{fqdn}, addrs[0..1], bytes);
     }
 
     pub fn write(m: Message, w: *std.io.AnyWriter) !usize {
-        try w.writeInt(u96, @bitCast(m.header), .big);
-        std.debug.assert(@sizeOf(u96) >= 12);
-        return 12;
+        const hlen = try m.header.write(w);
+        std.debug.assert(hlen == 12);
+        return hlen;
     }
 
     test query {
@@ -384,13 +468,31 @@ pub const Label = struct {
         @panic("unreachable");
     }
 
-    pub fn writeName(name: []const u8, w: *std.io.AnyWriter) !void {
+    pub fn writeName(name: []const u8, w: *std.io.AnyWriter) !usize {
         var itr = std.mem.splitScalar(u8, name, '.');
+        var len: usize = 0;
         while (itr.next()) |n| {
             std.debug.assert(n.len <= 63);
             try w.writeByte(@intCast(n.len));
             try w.writeAll(n);
+            len += n.len + 1;
         }
+        if (name[name.len - 1] != '.') {
+            try w.writeByte(0);
+            len += 1;
+        }
+
+        return len;
+    }
+
+    test writeName {
+        var buffer: [512]u8 = undefined;
+        var fbs = std.io.fixedBufferStream(&buffer);
+        var writer = fbs.writer();
+        var w = writer.any();
+
+        try std.testing.expectEqual(try writeName("gr.ht", &w), 7);
+        try std.testing.expectEqual(try writeName("gr.ht.", &w), 7);
     }
 
     pub fn write(l: Label, w: *std.io.AnyWriter) !void {
@@ -456,6 +558,56 @@ test "build pkt non-fqdn" {
     );
 }
 
+test "build answer" {
+    var buffer: [39]u8 = undefined;
+
+    const msg0 = try Message.answer(
+        31337,
+        &[1][]const u8{"gr.ht."},
+        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &buffer,
+    );
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
+        4,   20,  69,
+    }, &buffer);
+    try std.testing.expectEqual(msg0.header.qdcount, 1);
+    try std.testing.expectEqual(msg0.header.ancount, 1);
+
+    const msg1 = try Message.answer(
+        31337,
+        &[1][]const u8{"gr.ht"},
+        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &buffer,
+    );
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
+        4,   20,  69,
+    }, &buffer);
+    try std.testing.expectEqual(msg1.header.qdcount, 1);
+    try std.testing.expectEqual(msg1.header.ancount, 1);
+}
+
+test "build answerDrop" {
+    var buffer: [39]u8 = @splat(0xff);
+    const msg0 = try Message.answerDrop(31337, "gr.ht.", &buffer);
+
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
+        12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 0,
+        0,   0,   0,
+    }, &buffer);
+    try std.testing.expectEqual(msg0.header.qdcount, 1);
+    try std.testing.expectEqual(msg0.header.ancount, 1);
+}
+
 test "grht vectors" {
     //const a = std.testing.allocator;
     const msg0 = try Message.fromBytes(&[_]u8{
@@ -480,8 +632,6 @@ test "grht vectors" {
     try std.testing.expectEqual(msg1.header.qdcount, 1);
     try std.testing.expectEqual(msg1.header.ancount, 0);
 }
-
-test "simple test" {}
 
 test "fuzz example" {
     //const global = struct {
