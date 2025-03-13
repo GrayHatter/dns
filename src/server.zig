@@ -22,7 +22,7 @@ pub fn main() !void {
         }
     }
 
-    const downstream: DNS.Peer = try .listen(.{ 127, 0, 0, 1 }, 53);
+    const downstream: DNS.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
@@ -64,11 +64,9 @@ pub fn main() !void {
         //log.err("data {any}", .{buffer[0..icnt]});
         log.err("received from {any}", .{addr.in});
 
-        const msg = try DNS.Message.fromBytes(a, buffer[0..icnt]);
+        const msg = try DNS.Message.fromBytes(buffer[0..icnt]);
         //log.err("data {any}", .{msg});
-        // defer once in loop
-        if (msg.questions) |q| a.free(q);
-        if (msg.answers) |an| a.free(an);
+        _ = msg;
 
         log.err("bounce", .{});
         up_idx +%= 1;

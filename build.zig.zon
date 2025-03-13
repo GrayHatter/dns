@@ -1,6 +1,7 @@
 .{
-    .name = "dns",
+    .name = .dns,
     .version = "0.0.0",
+    .fingerprint = 0x82eddc4155c08ec3,
     .dependencies = .{ },
     .paths = .{
         "build.zig",

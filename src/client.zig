@@ -1,5 +1,4 @@
 pub fn main() !void {
-    const a = std.heap.page_allocator;
     log.err("started", .{});
 
     var domain: ?[]const u8 = null;
@@ -18,15 +17,14 @@ pub fn main() !void {
 
     const upstream = try DNS.Peer.connect(nameserver, 53);
 
-    const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
     var request: [1024]u8 = undefined;
-    const msgsize = try msg.write(&request);
+    const msg = try DNS.Message.query(&[1][]const u8{domain orelse "gr.ht."}, &request);
 
-    log.err("msg {}", .{msgsize});
-    log.err("data {any}", .{request[0..msgsize]});
-    log.err("data {s}", .{request[0..msgsize]});
+    log.err("msg {}", .{msg.bytes.len});
+    log.err("data {any}", .{request[0..msg.bytes.len]});
+    log.err("data {s}", .{request[0..msg.bytes.len]});
 
-    try upstream.send(request[0..msgsize]);
+    try upstream.send(request[0..msg.bytes.len]);
 
     var buffer: [1024]u8 = undefined;
     const icnt = try upstream.recv(&buffer);
@@ -35,6 +33,10 @@ pub fn main() !void {
     log.err("data {s}", .{buffer[0..icnt]});
 
     log.err("done", .{});
+}
+
+test main {
+    _ = &main;
 }
 
 const DNS = @import("dns.zig");
