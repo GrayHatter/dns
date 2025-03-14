@@ -78,8 +78,8 @@ pub fn main() !void {
         log.err("received from {any}", .{addr.in});
 
         const msg = try DNS.Message.fromBytes(buffer[0..icnt]);
-        var address_bufs: [16]DNS.Address = undefined;
-        var addresses: std.ArrayListUnmanaged(DNS.Address) = .{
+        var address_bufs: [16]DNS.Message.Resource.RData = undefined;
+        var addresses: std.ArrayListUnmanaged(DNS.Message.Resource.RData) = .{
             .items = &address_bufs,
             .capacity = address_bufs.len,
         };

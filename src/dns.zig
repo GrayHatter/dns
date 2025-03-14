@@ -142,18 +142,27 @@ pub const Message = struct {
         rtype: Type,
         class: Class,
         ttl: u32,
-        addr: Address,
+        data: RData,
 
-        pub fn init(fqdn: []const u8, addr: Address, ttl: u32) Resource {
+        pub const RData = union(enum) {
+            a: [4]u8,
+            aaaa: [16]u8,
+            cname: []const u8,
+            soa: struct {},
+        };
+
+        pub fn init(fqdn: []const u8, rdata: RData, ttl: u32) Resource {
             return .{
                 .name = fqdn,
-                .rtype = switch (addr) {
+                .rtype = switch (rdata) {
                     .a => .a,
                     .aaaa => .aaaa,
+                    .cname => .cname,
+                    .soa => .soa,
                 },
                 .class = .in,
                 .ttl = ttl,
-                .addr = addr,
+                .data = rdata,
             };
         }
 
@@ -172,7 +181,7 @@ pub const Message = struct {
             idx += 2;
             try w.writeInt(u32, r.ttl, .big);
             idx += 4;
-            switch (r.addr) {
+            switch (r.data) {
                 .a => |a| {
                     try w.writeInt(u16, 4, .big);
                     try w.writeAll(&a);
@@ -183,6 +192,10 @@ pub const Message = struct {
                     try w.writeAll(&aaaa);
                     idx += 18;
                 },
+                .cname => |name| {
+                    idx += try Label.writeName(name, w);
+                },
+                .soa => unreachable,
             }
 
             return idx;
@@ -195,7 +208,7 @@ pub const Message = struct {
         md, // obsolote -> mx
         mf, // obsolote -> mx
         cname,
-        sao,
+        soa,
         mb,
         mg,
         mr,
@@ -269,30 +282,31 @@ pub const Message = struct {
         for (0..payload_end) |payload_idx| {
             if (payload_idx < msg.header.qdcount) {
                 const name = try Label.getName(name_buf, msg.bytes, &idx);
-                log.warn("label name {s}", .{name});
-                if (payload_idx == index) {
-                    return .{ .question = .{
-                        .name = name,
-                        .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
-                        .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
-                    } };
-                } else {
-                    idx += 4;
-                }
+                log.debug("label name {s}", .{name});
+                if (payload_idx == index) return .{ .question = .{
+                    .name = name,
+                    .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
+                    .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
+                } };
+                idx += 4;
                 //log.warn("{any}", .{q.*});
             } else if (payload_idx >= msg.header.qdcount) {
-                log.warn("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
+                log.debug("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
                 const name = try Label.getName(name_buf, msg.bytes, &idx);
-                log.warn("answer label {s}", .{name});
+                log.debug("answer label {s}", .{name});
                 const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
+                if (rdlen > msg.bytes.len - idx) return error.InvalidPacket;
                 if (payload_idx != index) {
-                    idx += rdlen;
+                    idx += 10 + rdlen;
                     continue;
                 }
                 const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
-                const addr: Address = switch (rtype) {
+                log.debug("answer type {}", .{rtype});
+                const addr: Resource.RData = switch (rtype) {
                     .a => .{ .a = msg.bytes[idx..][10..][0..4].* },
                     .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
+                    .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
+                    .soa => undefined,
                     else => return error.ResponseTypeNotImplemented,
                 };
 
@@ -301,7 +315,7 @@ pub const Message = struct {
                     .rtype = rtype,
                     .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
                     .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
-                    .addr = addr,
+                    .data = addr,
                 };
 
                 return .{ .answer = r };
@@ -340,7 +354,7 @@ pub const Message = struct {
         return msg;
     }
 
-    pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Address, bytes: []u8) !Message {
+    pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Resource.RData, bytes: []u8) !Message {
         var h: Header = .{
             .id = id,
             .qr = true,
@@ -382,7 +396,7 @@ pub const Message = struct {
     }
 
     pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
-        const addrs: [16]Address = @splat(Address{ .a = @splat(0) });
+        const addrs: [16]Resource.RData = @splat(Resource.RData{ .a = @splat(0) });
         return try answer(id, &[1][]const u8{fqdn}, addrs[0..1], bytes);
     }
 
@@ -446,10 +460,10 @@ pub const Label = struct {
                 continue :sw bytes[idx];
             },
             192...255 => |b| {
+                if (!pointered) index.* = idx + 2;
                 pointered = true;
                 idx += 2;
                 if (idx >= bytes.len) return error.InvalidLabel;
-                index.* = idx;
                 const offset: u16 = @as(u16, b & 0b111111) << 8 | bytes[idx - 1];
                 if (offset < 12 or offset >= bytes.len) return error.InvalidLabel;
                 idx = offset;
@@ -491,11 +505,6 @@ pub const Label = struct {
         try w.writeByte(l.len);
         try w.writeAll(l.name);
     }
-};
-
-pub const Address = union(enum) {
-    a: [4]u8,
-    aaaa: [16]u8,
 };
 
 test "Message.Header" {
@@ -556,7 +565,7 @@ test "build answer" {
     const msg0 = try Message.answer(
         31337,
         &[1][]const u8{"gr.ht."},
-        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
         &buffer,
     );
 
@@ -572,7 +581,7 @@ test "build answer" {
     const msg1 = try Message.answer(
         31337,
         &[1][]const u8{"gr.ht"},
-        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
         &buffer,
     );
 
@@ -590,7 +599,7 @@ test "build answer" {
     const msg2 = try Message.answer(
         31337,
         &[1][]const u8{"gr.ht."},
-        &[1]Address{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
         &big_buffer,
     );
     try std.testing.expectEqualSlices(u8, &[_]u8{
@@ -602,27 +611,68 @@ test "build answer" {
 }
 
 test "response iter" {
-    const base = [_]u8{
-        197, 22,  129, 128, 0,   1,   0,   1,   0,   0,   0,   0,
-        7,   122, 105, 103, 108, 97,  110, 103, 3,   111, 114, 103,
-        0,   0,   28,  0,   1,   192, 12,  0,   28,  0,   1,   0,
-        0,   1,   44,  0,   16,  42,  1,   4,   249, 48,  81,  75,
-        210, 0,   0,   0,   0,   0,   0,   0,   2,
-    };
-    const msg: Message = try .fromBytes(&base);
-    var it = msg.iterator();
-    try std.testing.expectEqual(msg.header.qdcount, 1);
-    try std.testing.expectEqual(msg.header.ancount, 1);
-    var count: usize = 2;
-    while (try it.next()) |r| {
-        switch (r) {
-            .question => try std.testing.expectEqual(count, 2),
-            .answer => try std.testing.expectEqual(count, 1),
+    {
+        const base = [_]u8{
+            197, 22,  129, 128, 0,   1,   0,   1,   0,   0,   0,   0,
+            7,   122, 105, 103, 108, 97,  110, 103, 3,   111, 114, 103,
+            0,   0,   28,  0,   1,   192, 12,  0,   28,  0,   1,   0,
+            0,   1,   44,  0,   16,  42,  1,   4,   249, 48,  81,  75,
+            210, 0,   0,   0,   0,   0,   0,   0,   2,
+        };
+        const msg: Message = try .fromBytes(&base);
+        var it = msg.iterator();
+        try std.testing.expectEqual(msg.header.qdcount, 1);
+        try std.testing.expectEqual(msg.header.ancount, 1);
+        var count: usize = 2;
+        while (try it.next()) |r| {
+            switch (r) {
+                .question => try std.testing.expectEqual(count, 2),
+                .answer => try std.testing.expectEqual(count, 1),
+            }
+            count -%= 1;
         }
-        count -%= 1;
-    }
 
-    try std.testing.expectEqual(count, 0);
+        try std.testing.expectEqual(count, 0);
+    }
+    {
+        const base = [_]u8{
+            242, 38,  129, 128, 0,   1,   0,   4,   0,   1,   0,   0,   3,
+            110, 110, 110, 9,   110, 100, 110, 110, 101, 110, 101, 110, 110,
+            3,   99,  110, 109, 0,   0,   28,  0,   1,   192, 12,  0,   5,
+            0,   1,   0,   0,   11,  214, 0,   25,  17,  110, 110, 110, 45,
+            110, 105, 110, 110, 101, 110, 101, 110, 110, 45,  99,  110, 109,
+            4,   103, 110, 108, 98,  192, 16,  192, 47,  0,   5,   0,   1,
+            0,   0,   11,  214, 0,   32,  14,  50,  45,  48,  49,  45,  51,
+            55,  45,  50,  45,  45,  45,  49,  56,  3,   99,  100, 120, 7,
+            99,  45,  45,  45,  45,  105, 110, 3,   110, 101, 110, 0,   192,
+            84,  0,   5,   0,   1,   0,   0,   0,   32,  0,   28,  3,   110,
+            110, 110, 9,   110, 105, 110, 110, 101, 110, 100, 110, 110, 3,
+            99,  110, 100, 7,   100, 100, 100, 100, 100, 100, 120, 192, 111,
+            192, 128, 0,   5,   0,   1,   0,   0,   83,  84,  0,   21,  5,
+            101, 54,  52,  52,  57,  1,   97,  10,  97,  107, 97,  109, 97,
+            105, 101, 100, 103, 101, 192, 111, 192, 174, 0,   6,   0,   1,
+            0,   0,   2,   220, 0,   46,  3,   110, 48,  97,  192, 176, 10,
+            104, 110, 110, 110, 109, 97,  110, 110, 101, 110, 6,   97,  107,
+            97,  109, 97,  105, 192, 26,  103, 212, 110, 234, 0,   0,   3,
+            232, 0,   0,   3,   232, 0,   0,   3,   232, 0,   0,   7,   8,
+        };
+        const msg: Message = try .fromBytes(&base);
+        var it = msg.iterator();
+        try std.testing.expectEqual(msg.header.qdcount, 1);
+        try std.testing.expectEqual(msg.header.ancount, 4);
+        try std.testing.expectEqual(msg.header.arcount, 0);
+        try std.testing.expectEqual(msg.header.nscount, 1);
+        var count: usize = 6;
+        while (try it.next()) |r| {
+            switch (r) {
+                .question => try std.testing.expectEqual(count, 6),
+                .answer => try std.testing.expect(count <= 5),
+            }
+            count -%= 1;
+        }
+
+        try std.testing.expectEqual(count, 0);
+    }
 }
 
 test "build answerDrop" {
