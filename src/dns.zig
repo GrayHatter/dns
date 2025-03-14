@@ -282,7 +282,6 @@ pub const Message = struct {
         for (0..payload_end) |payload_idx| {
             if (payload_idx < msg.header.qdcount) {
                 const name = try Label.getName(name_buf, msg.bytes, &idx);
-                log.debug("label name {s}", .{name});
                 if (payload_idx == index) return .{ .question = .{
                     .name = name,
                     .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
@@ -291,9 +290,7 @@ pub const Message = struct {
                 idx += 4;
                 //log.warn("{any}", .{q.*});
             } else if (payload_idx >= msg.header.qdcount) {
-                log.debug("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
                 const name = try Label.getName(name_buf, msg.bytes, &idx);
-                log.debug("answer label {s}", .{name});
                 const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
                 if (rdlen > msg.bytes.len - idx) return error.InvalidPacket;
                 if (payload_idx != index) {
@@ -301,7 +298,6 @@ pub const Message = struct {
                     continue;
                 }
                 const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
-                log.debug("answer type {}", .{rtype});
                 const addr: Resource.RData = switch (rtype) {
                     .a => .{ .a = msg.bytes[idx..][10..][0..4].* },
                     .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
