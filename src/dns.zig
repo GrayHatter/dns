@@ -1,36 +1,3 @@
-pub const Domains = struct {
-    strings: std.ArrayListUnmanaged(u8),
-    loc_table: std.HashMapUnmanaged(
-        u32,
-        void,
-        std.hash_map.StringIndexContext,
-        std.hash_map.default_max_load_percentage,
-    ),
-};
-
-pub const Cache = struct {
-    tld: std.StringHashMapUnmanaged(Zone),
-};
-
-pub const Zone = struct {
-    domains: std.StringHashMapUnmanaged(CacheRes),
-};
-
-pub const CacheRes = union(enum) {
-    time: Result,
-    static: Result,
-    cached: Result,
-
-    pub const Result = struct {
-        drop: bool = true,
-        ttl: u32,
-        addr: union(enum) {
-            a: [4]u8,
-            aaaa: [16]u8,
-        },
-    };
-};
-
 pub const Peer = struct {
     addr: std.net.Address,
     sock: std.posix.socket_t,

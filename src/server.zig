@@ -1,8 +1,7 @@
 fn usage() !void {}
 
 pub fn main() !void {
-    const a = std.heap.page_allocator;
-    // TODO smp alloc
+    const a = std.heap.smp_allocator;
 
     var blocks: ?[]const u8 = null;
     var blocked_ips: std.ArrayListUnmanaged([4]u8) = .{};
@@ -37,14 +36,14 @@ pub fn main() !void {
 
     log.err("started", .{});
 
-    var cache: DNS.Cache = .{
-        .tld = .{},
+    var cache: ZoneCache = .{
+        .alloc = a,
     };
 
-    try cache.tld.put(a, "com", .{ .domains = .{} });
-    try cache.tld.put(a, "net", .{ .domains = .{} });
-    try cache.tld.put(a, "org", .{ .domains = .{} });
-    try cache.tld.put(a, "ht", .{ .domains = .{} });
+    try cache.tld.put(a, "com", .{});
+    try cache.tld.put(a, "net", .{});
+    try cache.tld.put(a, "org", .{});
+    try cache.tld.put(a, "ht", .{});
 
     if (blocks) |b| {
         a.free(try parse(a, b));
@@ -55,10 +54,7 @@ pub fn main() !void {
         log.err("tld {s}", .{domain.tld});
         var tld = cache.tld.getPtr(domain.tld).?;
         log.err("zone {s}", .{domain.zone});
-        try tld.domains.put(a, domain.zone, .{ .static = .{
-            .ttl = 0xffffffff,
-            .addr = .{ .a = .{ 0, 0, 0, 0 } },
-        } });
+        try tld.zones.put(a, domain.zone, .{ .behavior = .drop });
     }
 
     var upconns: [4]DNS.Peer = undefined;
@@ -115,10 +111,11 @@ pub fn main() !void {
                 domains.appendAssumeCapacity(qdomains[iter.index][0..q.name.len]);
 
                 const domain: Domain = .init(q.name);
-                const tld: *DNS.Zone = f: {
+                const tld: *Zone = f: {
                     if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                         if (!goptr.found_existing) {
-                            goptr.value_ptr.* = .{ .domains = .{} };
+                            goptr.key_ptr.* = try a.dupe(u8, domain.tld);
+                            goptr.value_ptr.* = .{};
                         }
                         break :f goptr.value_ptr;
                     } else |err| {
@@ -127,8 +124,8 @@ pub fn main() !void {
                     }
                 };
 
-                if (tld.domains.getPtr(domain.zone)) |zone| switch (zone.*) {
-                    .static => {
+                if (tld.zones.getPtr(domain.zone)) |zone| switch (zone.behavior) {
+                    .drop => {
                         var ans_bytes: [512]u8 = undefined;
                         if (msg.header.qdcount == 1) {
                             const ans: DNS.Message = try .answerDrop(
@@ -192,6 +189,59 @@ pub fn main() !void {
 
     log.err("done", .{});
 }
+
+pub const Behavior = union(enum) {
+    new: void,
+    drop: void,
+    cached: Result,
+
+    pub const Result = struct {
+        drop: bool = true,
+        ttl: u32,
+        addr: union(enum) {
+            a: [4]u8,
+            aaaa: [16]u8,
+        },
+    };
+};
+
+const Zone = struct {
+    zones: std.StringHashMapUnmanaged(Zone) = .{},
+    behavior: Behavior = .new,
+};
+
+const ZoneCache = struct {
+    alloc: Allocator,
+    tld: std.StringHashMapUnmanaged(Zone) = .{},
+    strings: std.ArrayListUnmanaged(u8) = .{},
+    loc_table: std.HashMapUnmanaged(
+        u32,
+        void,
+        std.hash_map.StringIndexContext,
+        std.hash_map.default_max_load_percentage,
+    ) = .{},
+
+    pub fn store(zc: *ZoneCache, str: []const u8) !Zone.Index {
+        try zc.strings.ensureUnusedCapacityp(zc.alloc, str.len + 1);
+        zc.strings.appendSliceAssumeCapacity(str);
+        zc.strings.appendAssumeCapacity(0);
+
+        const str_index: u32 = @intCast(zc.strings.items.len - str.len - 1);
+        const key: []const u8 = zc.strings.items[str_index..][0..str.len :0];
+        const gop = try zc.loc_table.getOrPutContextAdapted(
+            zc.alloc,
+            key,
+            std.hash_map.StringIndexAdapter{ .bytes = zc.strings },
+            std.hash_map.StringIndexContext{ .bytes = zc.strings },
+        );
+
+        if (gop.found_existing) {
+            zc.strings.shrinkRetainingCapacity(str_index);
+        } else {
+            gop.key_ptr.* = str_index;
+        }
+    }
+};
 
 pub const Domain = struct {
     tld: []const u8,
