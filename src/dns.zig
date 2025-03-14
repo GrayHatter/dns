@@ -290,18 +290,18 @@ pub const Message = struct {
                     continue;
                 }
                 const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
-                if (rtype != .a and rtype != .aaaa) return error.ResponseTypeNotImplemented;
+                const addr: Address = switch (rtype) {
+                    .a => .{ .a = msg.bytes[idx..][10..][0..4].* },
+                    .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
+                    else => return error.ResponseTypeNotImplemented,
+                };
 
                 const r: Resource = .{
                     .name = name,
                     .rtype = rtype,
                     .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
                     .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
-                    .addr = switch (rdlen) {
-                        4 => .{ .a = msg.bytes[idx..][10..][0..4].* },
-                        16 => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
-                        else => return error.InvalidResourceData,
-                    },
+                    .addr = addr,
                 };
 
                 return .{ .answer = r };
