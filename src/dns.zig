@@ -280,33 +280,31 @@ pub const Message = struct {
                     idx += 4;
                 }
                 //log.warn("{any}", .{q.*});
-            } else if (payload_idx < msg.header.qdcount + msg.header.ancount) {
-                if (payload_idx == index) {
-                    log.warn("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
-                    const name = try Label.getName(name_buf, msg.bytes, &idx);
-                    log.warn("answer label {s}", .{name});
-                    const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
-                    if (payload_idx == index) {
-                        const r: Resource = .{
-                            .name = name,
-                            .rtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
-                            .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
-                            .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
-                            .addr = switch (rdlen) {
-                                4 => .{ .a = msg.bytes[idx..][10..][0..4].* },
-                                16 => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
-                                else => return error.InvalidResourceData,
-                            },
-                        };
-                        if (r.rtype != .a and r.rtype != .aaaa) return error.ResponseTypeNotImplemented;
-
-                        return .{ .answer = r };
-                    } else {
-                        _ = try Label.getName(name_buf, msg.bytes, &idx);
-                        idx += rdlen;
-                        continue;
-                    }
+            } else if (payload_idx >= msg.header.qdcount) {
+                log.warn("answer {} {} {}", .{ idx, msg.bytes[idx], msg.bytes.len });
+                const name = try Label.getName(name_buf, msg.bytes, &idx);
+                log.warn("answer label {s}", .{name});
+                const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
+                if (payload_idx != index) {
+                    idx += rdlen;
+                    continue;
                 }
+                const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
+                if (rtype != .a and rtype != .aaaa) return error.ResponseTypeNotImplemented;
+
+                const r: Resource = .{
+                    .name = name,
+                    .rtype = rtype,
+                    .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
+                    .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
+                    .addr = switch (rdlen) {
+                        4 => .{ .a = msg.bytes[idx..][10..][0..4].* },
+                        16 => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
+                        else => return error.InvalidResourceData,
+                    },
+                };
+
+                return .{ .answer = r };
             }
         } else return error.InvalidIndex;
     }
