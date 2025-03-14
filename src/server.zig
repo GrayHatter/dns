@@ -182,8 +182,14 @@ pub fn main() !void {
             log.debug("rdata {any}", .{relayed});
             break :e null;
         }) |pay| switch (pay) {
-            .question => |q| log.err("r question = {}", .{q}),
-            .answer => |r| log.err("r answer = {}", .{r}),
+            .question => |q| {
+                log.err("r question = {s}", .{q.name});
+                //log.debug("r question = {}", .{q});
+            },
+            .answer => |r| {
+                log.err("r question = {s}", .{r.name});
+                //log.debug("r question = {}", .{r});
+            },
         };
     }
 
