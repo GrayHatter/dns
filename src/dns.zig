@@ -221,6 +221,8 @@ pub const Message = struct {
         txt,
         aaaa = 28,
         EDNS = 41,
+        https = 65, // RFC9460 -- so preoccupied with whether or not they could,
+        //                        that they didn't stop to think if they should!
         // The following are QTypes
         axfr = 252,
         mailb,
@@ -305,6 +307,7 @@ pub const Message = struct {
                     .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
                     .soa => undefined,
                     .EDNS => undefined,
+                    .https => undefined,
                     else => |err| {
                         log.err("not implemented {}", .{err});
                         return error.ResponseTypeNotImplemented;
@@ -710,6 +713,32 @@ test "response iter" {
             switch (r) {
                 .question => try std.testing.expectEqual(count, 16),
                 .answer => try std.testing.expect(count <= 15),
+            }
+            count -%= 1;
+        }
+
+        try std.testing.expectEqual(count, 0);
+    }
+
+    { // RFC9460
+        const base = [_]u8{
+            212, 149, 129, 128, 0,   1,   0, 1,   0,   0,   0,   0,
+            5,   102, 111, 110, 116, 115, 7, 103, 115, 116, 97,  116,
+            105, 99,  3,   99,  111, 109, 0, 0,   65,  0,   1,   192,
+            12,  0,   65,  0,   1,   0,   0, 50,  227, 0,   13,  0,
+            1,   0,   0,   1,   0,   6,   2, 104, 50,  2,   104, 51,
+        };
+        const msg: Message = try .fromBytes(&base);
+        var it = msg.iterator();
+        try std.testing.expectEqual(msg.header.qdcount, 1);
+        try std.testing.expectEqual(msg.header.ancount, 1);
+        try std.testing.expectEqual(msg.header.arcount, 0);
+        try std.testing.expectEqual(msg.header.nscount, 0);
+        var count: usize = 2;
+        while (try it.next()) |r| {
+            switch (r) {
+                .question => try std.testing.expectEqual(count, 2),
+                .answer => try std.testing.expect(count <= 1),
             }
             count -%= 1;
         }
