@@ -220,6 +220,7 @@ pub const Message = struct {
         mx,
         txt,
         aaaa = 28,
+        EDNS = 41,
         // The following are QTypes
         axfr = 252,
         mailb,
@@ -303,7 +304,11 @@ pub const Message = struct {
                     .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
                     .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
                     .soa => undefined,
-                    else => return error.ResponseTypeNotImplemented,
+                    .EDNS => undefined,
+                    else => |err| {
+                        log.err("not implemented {}", .{err});
+                        return error.ResponseTypeNotImplemented;
+                    },
                 };
 
                 const r: Resource = .{
@@ -663,6 +668,48 @@ test "response iter" {
             switch (r) {
                 .question => try std.testing.expectEqual(count, 6),
                 .answer => try std.testing.expect(count <= 5),
+            }
+            count -%= 1;
+        }
+
+        try std.testing.expectEqual(count, 0);
+    }
+
+    {
+        const base = [_]u8{
+            97,  83,  129, 128, 0,   1,   0,   14,  0,   0,   0,   1,
+            9,   112, 101, 111, 112, 108, 101, 45,  112, 97,  10,  103,
+            111, 111, 103, 108, 101, 97,  112, 105, 115, 3,   99,  111,
+            109, 0,   0,   1,   0,   1,
+            // zig fmt: off
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 251,  32,  42,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 189, 234,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 251,  46, 202,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250,  72, 202,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 251,  46, 234,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 251, 214, 138,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 172, 217,  12, 106,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 189, 202,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 191,  42,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 191,  74,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 189, 170,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 172, 217, 164, 106,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 250, 188,  10,
+            192,  12,  0, 1, 0, 1, 0, 0, 0, 58, 0, 4, 142, 251,  46, 170,
+              0,   0, 41, 2, 0, 0, 0, 128, 0, 0, 0,
+          };
+        // zig fmt: on
+        const msg: Message = try .fromBytes(&base);
+        var it = msg.iterator();
+        try std.testing.expectEqual(msg.header.qdcount, 1);
+        try std.testing.expectEqual(msg.header.ancount, 14);
+        try std.testing.expectEqual(msg.header.arcount, 1);
+        try std.testing.expectEqual(msg.header.nscount, 0);
+        var count: usize = 16;
+        while (try it.next()) |r| {
+            switch (r) {
+                .question => try std.testing.expectEqual(count, 16),
+                .answer => try std.testing.expect(count <= 15),
             }
             count -%= 1;
         }
