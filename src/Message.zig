@@ -42,7 +42,15 @@ pub const Resource = struct {
         a: [4]u8,
         aaaa: [16]u8,
         cname: []const u8,
-        soa: struct {},
+        soa: struct {
+            mname: []const u8, // primary server
+            rname: []const u8, // owner mailbox
+            serial: u32,
+            refresh: u32,
+            retry: u32,
+            expire: u32,
+            minimum: u32,
+        },
     };
 
     pub fn init(fqdn: []const u8, rdata: RData, ttl: u32) Resource {
@@ -199,7 +207,15 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 .a => .{ .a = msg.bytes[idx..][10..][0..4].* },
                 .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
                 .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
-                .soa => undefined,
+                .soa => .{ .soa = .{
+                    .mname = name,
+                    .rname = undefined,
+                    .serial = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                    .refresh = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                    .retry = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                    .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                    .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                } },
                 .EDNS => undefined,
                 .https => undefined,
                 else => |err| {
