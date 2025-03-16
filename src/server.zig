@@ -54,7 +54,7 @@ pub fn main() !void {
         log.err("tld {s}", .{domain.tld});
         var tld = cache.tld.getPtr(domain.tld).?;
         log.err("zone {s}", .{domain.zone});
-        try tld.zones.put(a, domain.zone, .{ .behavior = .drop });
+        try tld.zones.put(a, domain.zone, .{ .behavior = .{ .nxdomain = 300 } });
     }
 
     var upconns: [4]DNS.Peer = undefined;
@@ -129,7 +129,7 @@ pub fn main() !void {
                 if (tld.zones.getPtr(domain.zone)) |zone| {
                     log.err("{} hits on {s}", .{ zone.hits, domain.zone });
                     switch (zone.behavior) {
-                        .drop => {
+                        .nxdomain => {
                             var ans_bytes: [512]u8 = undefined;
                             if (msg.header.qdcount == 1) {
                                 const ans: DNS.Message = try .answerDrop(
@@ -205,7 +205,7 @@ pub fn main() !void {
 
 pub const Behavior = union(enum) {
     new: void,
-    drop: void,
+    nxdomain: u32,
     cached: Result,
 
     pub const Result = struct {

@@ -367,9 +367,9 @@ pub const Message = struct {
             .tc = false,
             .rd = true,
             .ra = true,
-            .rcode = .success,
+            .rcode = if (ips.len == 0) .name else .success,
             .qdcount = @intCast(fqdns.len),
-            .ancount = @intCast(fqdns.len),
+            .ancount = @intCast(ips.len),
             .nscount = 0,
             .arcount = 0,
         };
@@ -388,10 +388,12 @@ pub const Message = struct {
             idx += try q.write(&w);
         }
 
-        for (fqdns, ips, pointers) |fqdn, ip, p| {
-            const r: Resource = .init(fqdn, ip, 300);
-            idx += try r.write(&w, p);
-        }
+        if (fqdns.len == ips.len) {
+            for (fqdns, ips, pointers) |fqdn, ip, p| {
+                const r: Resource = .init(fqdn, ip, 300);
+                idx += try r.write(&w, p);
+            }
+        } else if (ips.len != 0) return error.InvalidAnswer;
 
         return .{
             .header = h,
@@ -400,8 +402,7 @@ pub const Message = struct {
     }
 
     pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
-        const addrs: [16]Resource.RData = @splat(Resource.RData{ .a = @splat(0) });
-        return try answer(id, &[1][]const u8{fqdn}, addrs[0..1], bytes);
+        return try answer(id, &[1][]const u8{fqdn}, &[0]Resource.RData{}, bytes);
     }
 
     pub fn write(m: Message, w: *std.io.AnyWriter) !usize {
@@ -748,17 +749,15 @@ test "response iter" {
 }
 
 test "build answerDrop" {
-    var buffer: [39]u8 = @splat(0xff);
+    var buffer: [23]u8 = @splat(0xff);
     const msg0 = try Message.answerDrop(31337, "gr.ht.", &buffer);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
-        2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
-        12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 0,
-        0,   0,   0,
+        122, 105, 133, 131, 0,   1,   0, 0, 0, 0, 0, 0,
+        2,   103, 114, 2,   104, 116, 0, 0, 1, 0, 1,
     }, &buffer);
     try std.testing.expectEqual(msg0.header.qdcount, 1);
-    try std.testing.expectEqual(msg0.header.ancount, 1);
+    try std.testing.expectEqual(msg0.header.ancount, 0);
 }
 
 test "grht vectors" {
