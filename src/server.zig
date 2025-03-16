@@ -25,7 +25,7 @@ pub fn main() !void {
         }
     }
 
-    const downstream: DNS.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
+    const downstream: network.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
@@ -57,7 +57,7 @@ pub fn main() !void {
         try tld.zones.put(a, domain.zone, .{ .behavior = .{ .nxdomain = 300 } });
     }
 
-    var upconns: [4]DNS.Peer = undefined;
+    var upconns: [4]network.Peer = undefined;
     for (&upconns, upstreams) |*dst, ip| {
         dst.* = try .connect(ip, 53);
     }
@@ -311,6 +311,7 @@ test main {
 }
 
 const DNS = @import("dns.zig");
+const network = @import("network.zig");
 
 const std = @import("std");
 const log = std.log;

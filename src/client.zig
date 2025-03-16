@@ -15,7 +15,7 @@ pub fn main() !void {
         }
     }
 
-    const upstream = try DNS.Peer.connect(nameserver, 53);
+    const upstream = try network.Peer.connect(nameserver, 53);
 
     var request: [1024]u8 = undefined;
     const msg = try DNS.Message.query(&[1][]const u8{domain orelse "gr.ht."}, &request);
@@ -40,6 +40,7 @@ test main {
 }
 
 const DNS = @import("dns.zig");
+const network = @import("network.zig");
 
 const std = @import("std");
 const log = std.log;
