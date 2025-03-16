@@ -75,7 +75,8 @@ pub fn main() !void {
         timer.reset();
         log.info("received {}", .{icnt});
         //log.err("data {any}", .{buffer[0..icnt]});
-        log.err("received from {any}", .{addr.in});
+        log.warn("received from {any}", .{addr.in});
+        //const current_time = std.time.timestamp();
 
         const msg = try DNS.Message.fromBytes(buffer[0..icnt]);
         var address_bufs: [16]DNS.Message.Resource.RData = undefined;
@@ -117,6 +118,7 @@ pub fn main() !void {
                             goptr.key_ptr.* = try a.dupe(u8, domain.tld);
                             goptr.value_ptr.* = .{};
                         }
+                        goptr.value_ptr.hits += 1;
                         break :f goptr.value_ptr;
                     } else |err| {
                         log.err("hash error {}", .{err});
@@ -124,22 +126,25 @@ pub fn main() !void {
                     }
                 };
 
-                if (tld.zones.getPtr(domain.zone)) |zone| switch (zone.behavior) {
-                    .drop => {
-                        var ans_bytes: [512]u8 = undefined;
-                        if (msg.header.qdcount == 1) {
-                            const ans: DNS.Message = try .answerDrop(
-                                msg.header.id,
-                                q.name,
-                                &ans_bytes,
-                            );
-                            try downstream.sendTo(addr, ans.bytes);
-                            log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
-                            continue :root;
-                        }
-                    },
-                    else => log.err("zone {}", .{zone}),
-                };
+                if (tld.zones.getPtr(domain.zone)) |zone| {
+                    log.err("{} hits on {s}", .{ zone.hits, domain.zone });
+                    switch (zone.behavior) {
+                        .drop => {
+                            var ans_bytes: [512]u8 = undefined;
+                            if (msg.header.qdcount == 1) {
+                                const ans: DNS.Message = try .answerDrop(
+                                    msg.header.id,
+                                    q.name,
+                                    &ans_bytes,
+                                );
+                                try downstream.sendTo(addr, ans.bytes);
+                                log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+                                continue :root;
+                            }
+                        },
+                        else => log.err("zone {}", .{zone}),
+                    }
+                }
 
                 addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
             },
@@ -153,17 +158,17 @@ pub fn main() !void {
             addresses.items,
             &answer_bytes,
         );
+        _ = answer;
+        //log.err("answer = {}", .{answer});
 
-        log.err("answer = {}", .{answer});
-
-        log.info("bounce", .{});
+        //log.info("bounce", .{});
         up_idx +%= 1;
         try upconns[up_idx].send(buffer[0..icnt]);
         var relay_buf: [1024]u8 = undefined;
         const b_cnt = try upconns[up_idx].recv(&relay_buf);
         const relayed = relay_buf[0..b_cnt];
-        log.info("bounce received {}", .{b_cnt});
-        log.debug("bounce data {any}", .{relayed});
+        //log.info("bounce received {}", .{b_cnt});
+        //log.debug("bounce data {any}", .{relayed});
 
         for (blocked_ips.items) |banned| {
             if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
@@ -183,11 +188,13 @@ pub fn main() !void {
             break :e null;
         }) |pay| switch (pay) {
             .question => |q| {
-                log.err("r question = {s}", .{q.name});
+                _ = q;
+                //log.err("r question = {s}", .{q.name});
                 //log.debug("r question = {}", .{q});
             },
             .answer => |r| {
-                log.err("r question = {s}", .{r.name});
+                _ = r;
+                //log.err("r question = {s}", .{r.name});
                 //log.debug("r question = {}", .{r});
             },
         };
@@ -214,6 +221,7 @@ pub const Behavior = union(enum) {
 const Zone = struct {
     zones: std.StringHashMapUnmanaged(Zone) = .{},
     behavior: Behavior = .new,
+    hits: u32 = 0,
 };
 
 const ZoneCache = struct {
