@@ -40,10 +40,18 @@ pub fn main() !void {
         .alloc = a,
     };
 
-    try cache.tld.put(a, "com", .{});
-    try cache.tld.put(a, "net", .{});
-    try cache.tld.put(a, "org", .{});
-    try cache.tld.put(a, "ht", .{});
+    try cache.tld.put(a, "com", .{
+        .name = try cache.store("com"),
+    });
+    try cache.tld.put(a, "net", .{
+        .name = try cache.store("net"),
+    });
+    try cache.tld.put(a, "org", .{
+        .name = try cache.store("org"),
+    });
+    try cache.tld.put(a, "ht", .{
+        .name = try cache.store("ht"),
+    });
 
     if (blocks) |b| {
         a.free(try parse(a, b));
@@ -54,7 +62,11 @@ pub fn main() !void {
         log.err("tld {s}", .{domain.tld});
         var tld = cache.tld.getPtr(domain.tld).?;
         log.err("zone {s}", .{domain.zone});
-        try tld.zones.put(a, domain.zone, .{ .behavior = .{ .nxdomain = 300 } });
+        const str = try cache.store(domain.zone);
+        _ = try tld.zones.getOrPut(a, .{
+            .name = str,
+            .behavior = .{ .nxdomain = 300 },
+        });
     }
 
     var upconns: [4]network.Peer = undefined;
@@ -116,7 +128,9 @@ pub fn main() !void {
                     if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                         if (!goptr.found_existing) {
                             goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                            goptr.value_ptr.* = .{};
+                            goptr.value_ptr.* = .{
+                                .name = try cache.store(domain.zone),
+                            };
                         }
                         goptr.value_ptr.hits += 1;
                         break :f goptr.value_ptr;
@@ -126,25 +140,27 @@ pub fn main() !void {
                     }
                 };
 
-                if (tld.zones.getPtr(domain.zone)) |zone| {
-                    log.err("{} hits on {s}", .{ zone.hits, domain.zone });
-                    switch (zone.behavior) {
-                        .nxdomain => {
-                            var ans_bytes: [512]u8 = undefined;
-                            if (msg.header.qdcount == 1) {
-                                const ans: DNS.Message = try .answerDrop(
-                                    msg.header.id,
-                                    q.name,
-                                    &ans_bytes,
-                                );
-                                try downstream.sendTo(addr, ans.bytes);
-                                log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
-                                continue :root;
-                            }
-                        },
-                        else => log.err("zone {}", .{zone}),
+                const lzone: Zone = .{ .name = try cache.store(domain.zone) };
+                if (tld.zones.getOrPut(a, lzone)) |zone| {
+                    if (zone.found_existing) {
+                        log.err("{} hits on {s}", .{ zone.key_ptr.hits, domain.zone });
+                        zone.key_ptr.hits += 1;
+                        switch (zone.key_ptr.behavior) {
+                            .nxdomain => {
+                                var ans_bytes: [512]u8 = undefined;
+                                if (msg.header.qdcount == 1) {
+                                    const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
+                                    try downstream.sendTo(addr, ans.bytes);
+                                    log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+                                    continue :root;
+                                }
+                            },
+                            else => log.err("zone {s}", .{domain.zone}),
+                        }
+                    } else {
+                        std.debug.print("cache missing \n", .{});
                     }
-                }
+                } else |e| return e;
 
                 addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
             },
@@ -193,9 +209,8 @@ pub fn main() !void {
                 //log.debug("r question = {}", .{q});
             },
             .answer => |r| {
-                _ = r;
-                //log.err("r question = {s}", .{r.name});
-                //log.debug("r question = {}", .{r});
+                log.err("r question = {s}", .{r.name});
+                log.debug("r question = {}", .{r});
             },
         };
     }
@@ -219,9 +234,31 @@ pub const Behavior = union(enum) {
 };
 
 const Zone = struct {
-    zones: std.StringHashMapUnmanaged(Zone) = .{},
+    name: String,
+    zones: std.ArrayHashMapUnmanaged(Zone, void, Hasher, false) = .{},
     behavior: Behavior = .new,
     hits: u32 = 0,
+
+    pub const String = enum(u32) {
+        empty,
+        _,
+
+        pub fn slice(str: String, zc: *const ZoneCache) [:0]const u8 {
+            const s = zc.strings.items[@intFromEnum(str)..];
+            const end = std.mem.indexOfScalar(u8, s, 0).?;
+            return s[0..end :0];
+        }
+    };
+
+    pub const Hasher = struct {
+        pub fn hash(_: Hasher, a: Zone) u32 {
+            return @truncate(std.hash.uint32(@intFromEnum(a.name)));
+        }
+
+        pub fn eql(_: Hasher, a: Zone, b: Zone, _: usize) bool {
+            return a.name == b.name;
+        }
+    };
 };
 
 const ZoneCache = struct {
@@ -235,8 +272,8 @@ const ZoneCache = struct {
         std.hash_map.default_max_load_percentage,
     ) = .{},
 
-    pub fn store(zc: *ZoneCache, str: []const u8) !Zone.Index {
-        try zc.strings.ensureUnusedCapacityp(zc.alloc, str.len + 1);
+    pub fn store(zc: *ZoneCache, str: []const u8) !Zone.String {
+        try zc.strings.ensureUnusedCapacity(zc.alloc, str.len + 1);
         zc.strings.appendSliceAssumeCapacity(str);
         zc.strings.appendAssumeCapacity(0);
 
@@ -245,14 +282,17 @@ const ZoneCache = struct {
         const gop = try zc.loc_table.getOrPutContextAdapted(
             zc.alloc,
             key,
-            std.hash_map.StringIndexAdapter{ .bytes = zc.strings },
-            std.hash_map.StringIndexContext{ .bytes = zc.strings },
+            std.hash_map.StringIndexAdapter{ .bytes = &zc.strings },
+            std.hash_map.StringIndexContext{ .bytes = &zc.strings },
         );
 
         if (gop.found_existing) {
             zc.strings.shrinkRetainingCapacity(str_index);
+            std.debug.print("store was existing\n", .{});
+            return @enumFromInt(gop.key_ptr.*);
         } else {
             gop.key_ptr.* = str_index;
+            return @enumFromInt(str_index);
         }
     }
 };
