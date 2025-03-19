@@ -1,5 +1,131 @@
 fn usage() !void {}
 
+fn core(
+    a: Allocator,
+    cache: *ZoneCache,
+    in_msg: []const u8,
+    downstream: network.Peer,
+    addr: std.net.Address,
+    upstream: network.Peer,
+    blocked_ips: []const [4]u8,
+) !void {
+    const msg = try DNS.Message.fromBytes(in_msg);
+    var address_bufs: [16]DNS.Message.Resource.RData = undefined;
+    var addresses: std.ArrayListUnmanaged(DNS.Message.Resource.RData) = .{
+        .items = &address_bufs,
+        .capacity = address_bufs.len,
+    };
+    addresses.items.len = 0;
+
+    var qdomains: [16][255]u8 = undefined;
+    var dbuf: [16][]const u8 = undefined;
+    var domains: std.ArrayListUnmanaged([]const u8) = .{
+        .items = &dbuf,
+        .capacity = dbuf.len,
+    };
+    domains.items.len = 0;
+
+    if (msg.header.qdcount >= 16) {
+        log.err("dropping invalid msg", .{});
+        log.debug("that message {any}", .{in_msg});
+        return;
+    }
+
+    var iter = msg.iterator();
+    while (iter.next() catch |err| e: {
+        log.err("question iter error {}", .{err});
+        log.debug("qdata {any}", .{in_msg});
+        break :e null;
+    }) |pay| switch (pay) {
+        .question => |q| {
+            log.err("name {s}", .{q.name});
+            @memcpy(qdomains[iter.index][0..q.name.len], q.name);
+            domains.appendAssumeCapacity(qdomains[iter.index][0..q.name.len]);
+
+            const domain: Domain = .init(q.name);
+            const tld: *Zone = f: {
+                if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
+                    if (!goptr.found_existing) {
+                        goptr.key_ptr.* = try a.dupe(u8, domain.tld);
+                        goptr.value_ptr.* = .{
+                            .name = try cache.store(domain.zone),
+                        };
+                    }
+                    goptr.value_ptr.hits += 1;
+                    break :f goptr.value_ptr;
+                } else |err| {
+                    log.err("hash error {}", .{err});
+                    break;
+                }
+            };
+
+            const lzone: Zone = .{ .name = try cache.store(domain.zone) };
+            if (tld.zones.getOrPut(a, lzone)) |zone| {
+                if (zone.found_existing) {
+                    log.err("{} hits on {s}", .{ zone.key_ptr.hits, domain.zone });
+                    zone.key_ptr.hits += 1;
+                    switch (zone.key_ptr.behavior) {
+                        .nxdomain => {
+                            var ans_bytes: [512]u8 = undefined;
+                            if (msg.header.qdcount == 1) {
+                                const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
+                                try downstream.sendTo(addr, ans.bytes);
+                                return;
+                            }
+                        },
+                        else => log.err("zone {s}", .{domain.zone}),
+                    }
+                } else {
+                    std.debug.print("cache missing \n", .{});
+                }
+            } else |e| return e;
+
+            addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
+        },
+        .answer => break,
+    };
+
+    var anbuf: [512]u8 = undefined;
+    const answer = try DNS.Message.answer(msg.header.id, domains.items, addresses.items, &anbuf);
+    _ = answer;
+    //log.err("answer = {}", .{answer});
+
+    //log.info("bounce", .{});
+    try upstream.send(in_msg);
+    var relay_buf: [1024]u8 = undefined;
+    const b_cnt = try upstream.recv(&relay_buf);
+    const relayed = relay_buf[0..b_cnt];
+    //log.info("bounce received {}", .{b_cnt});
+    //log.debug("bounce data {any}", .{relayed});
+
+    for (blocked_ips) |banned| {
+        if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
+            @memset(relayed[relayed.len - 4 .. relayed.len], 0);
+        }
+    }
+
+    try downstream.sendTo(addr, relay_buf[0..b_cnt]);
+
+    const rmsg: DNS.Message = try .fromBytes(relayed);
+    var rit = rmsg.iterator();
+
+    while (rit.next() catch |err| e: {
+        log.err("relayed iter error {}", .{err});
+        log.debug("rdata {any}", .{relayed});
+        break :e null;
+    }) |pay| switch (pay) {
+        .question => |q| {
+            _ = q;
+            //log.err("r question = {s}", .{q.name});
+            //log.debug("r question = {}", .{q});
+        },
+        .answer => |r| {
+            log.err("r question = {s}", .{r.name});
+            log.debug("r question = {}", .{r});
+        },
+    };
+}
+
 pub fn main() !void {
     const a = std.heap.smp_allocator;
 
@@ -80,7 +206,7 @@ pub fn main() !void {
     //const msgsize = try msg.write(&request);
 
     var timer: std.time.Timer = try .start();
-    root: while (true) {
+    while (true) {
         var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
         const icnt = try downstream.recvFrom(&buffer, &addr);
@@ -89,130 +215,19 @@ pub fn main() !void {
         //log.err("data {any}", .{buffer[0..icnt]});
         log.warn("received from {any}", .{addr.in});
         //const current_time = std.time.timestamp();
-
-        const msg = try DNS.Message.fromBytes(buffer[0..icnt]);
-        var address_bufs: [16]DNS.Message.Resource.RData = undefined;
-        var addresses: std.ArrayListUnmanaged(DNS.Message.Resource.RData) = .{
-            .items = &address_bufs,
-            .capacity = address_bufs.len,
-        };
-        addresses.items.len = 0;
-
-        var qdomains: [16][255]u8 = undefined;
-        var dbuf: [16][]const u8 = undefined;
-        var domains: std.ArrayListUnmanaged([]const u8) = .{
-            .items = &dbuf,
-            .capacity = dbuf.len,
-        };
-        domains.items.len = 0;
-
-        if (msg.header.qdcount >= 16) {
-            log.err("dropping invalid msg", .{});
-            log.debug("that message {any}", .{buffer[0..icnt]});
-            continue;
-        }
-
-        var iter = msg.iterator();
-        while (iter.next() catch |err| e: {
-            log.err("question iter error {}", .{err});
-            log.debug("qdata {any}", .{buffer[0..icnt]});
-            break :e null;
-        }) |pay| switch (pay) {
-            .question => |q| {
-                log.err("name {s}", .{q.name});
-                @memcpy(qdomains[iter.index][0..q.name.len], q.name);
-                domains.appendAssumeCapacity(qdomains[iter.index][0..q.name.len]);
-
-                const domain: Domain = .init(q.name);
-                const tld: *Zone = f: {
-                    if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
-                        if (!goptr.found_existing) {
-                            goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                            goptr.value_ptr.* = .{
-                                .name = try cache.store(domain.zone),
-                            };
-                        }
-                        goptr.value_ptr.hits += 1;
-                        break :f goptr.value_ptr;
-                    } else |err| {
-                        log.err("hash error {}", .{err});
-                        break;
-                    }
-                };
-
-                const lzone: Zone = .{ .name = try cache.store(domain.zone) };
-                if (tld.zones.getOrPut(a, lzone)) |zone| {
-                    if (zone.found_existing) {
-                        log.err("{} hits on {s}", .{ zone.key_ptr.hits, domain.zone });
-                        zone.key_ptr.hits += 1;
-                        switch (zone.key_ptr.behavior) {
-                            .nxdomain => {
-                                var ans_bytes: [512]u8 = undefined;
-                                if (msg.header.qdcount == 1) {
-                                    const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
-                                    try downstream.sendTo(addr, ans.bytes);
-                                    log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
-                                    continue :root;
-                                }
-                            },
-                            else => log.err("zone {s}", .{domain.zone}),
-                        }
-                    } else {
-                        std.debug.print("cache missing \n", .{});
-                    }
-                } else |e| return e;
-
-                addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
-            },
-            .answer => break,
-        };
-
-        var answer_bytes: [512]u8 = undefined;
-        const answer = try DNS.Message.answer(
-            msg.header.id,
-            domains.items,
-            addresses.items,
-            &answer_bytes,
+        try core(
+            a,
+            &cache,
+            buffer[0..icnt],
+            downstream,
+            addr,
+            upconns[up_idx],
+            blocked_ips.items,
         );
-        _ = answer;
-        //log.err("answer = {}", .{answer});
 
-        //log.info("bounce", .{});
-        up_idx +%= 1;
-        try upconns[up_idx].send(buffer[0..icnt]);
-        var relay_buf: [1024]u8 = undefined;
-        const b_cnt = try upconns[up_idx].recv(&relay_buf);
-        const relayed = relay_buf[0..b_cnt];
-        //log.info("bounce received {}", .{b_cnt});
-        //log.debug("bounce data {any}", .{relayed});
-
-        for (blocked_ips.items) |banned| {
-            if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
-                @memset(relayed[relayed.len - 4 .. relayed.len], 0);
-            }
-        }
-
-        try downstream.sendTo(addr, relay_buf[0..b_cnt]);
         log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
 
-        const rmsg: DNS.Message = try .fromBytes(relayed);
-        var rit = rmsg.iterator();
-
-        while (rit.next() catch |err| e: {
-            log.err("relayed iter error {}", .{err});
-            log.debug("rdata {any}", .{relayed});
-            break :e null;
-        }) |pay| switch (pay) {
-            .question => |q| {
-                _ = q;
-                //log.err("r question = {s}", .{q.name});
-                //log.debug("r question = {}", .{q});
-            },
-            .answer => |r| {
-                log.err("r question = {s}", .{r.name});
-                log.debug("r question = {}", .{r});
-            },
-        };
+        up_idx +%= 1;
     }
 
     log.err("done", .{});
