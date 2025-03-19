@@ -190,18 +190,12 @@ pub fn main() !void {
         .alloc = a,
     };
 
-    try cache.tld.put(a, "com", .{
-        .name = try cache.store("com"),
-    });
-    try cache.tld.put(a, "net", .{
-        .name = try cache.store("net"),
-    });
-    try cache.tld.put(a, "org", .{
-        .name = try cache.store("org"),
-    });
-    try cache.tld.put(a, "ht", .{
-        .name = try cache.store("ht"),
-    });
+    const preload_tlds = [_][]const u8{ "com", "net", "org", "ht" };
+    for (preload_tlds) |ptld| {
+        try cache.tld.put(a, ptld, .{
+            .name = try cache.store(ptld),
+        });
+    }
 
     for (blocks.items) |b| {
         a.free(try parse(a, b));
