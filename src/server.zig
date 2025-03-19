@@ -1,4 +1,23 @@
-fn usage() !void {}
+fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
+    if (err) |e| {
+        std.debug.print("Error: {s}\n\n", .{e});
+    }
+
+    std.debug.print(
+        \\Usage: {s} [options]
+        \\
+        \\Config Options: 
+        \\  -c, --config             - [ ] TODO document
+        \\                           - [ ] add config support
+        \\
+        \\Custom Blocking Options:
+        \\  --block <config_file>    TODO document
+        \\  --drop-ip <ip address>   Rewrites any matching IP address to 0.0.0.0
+        \\  --drop-domain <fqdn>     Returns NXDOMAIN for any queries for given fqdn
+        \\
+    , .{arg0});
+    std.posix.exit(1);
+}
 
 fn core(
     a: Allocator,
@@ -129,16 +148,17 @@ fn core(
 pub fn main() !void {
     const a = std.heap.smp_allocator;
 
-    var blocks: ?[]const u8 = null;
+    var blocks: std.ArrayListUnmanaged([]const u8) = .{};
     var blocked_ips: std.ArrayListUnmanaged([4]u8) = .{};
     var blocked_domains: std.ArrayListUnmanaged([]const u8) = .{};
 
     var argv = std.process.args();
+    const arg0 = argv.next().?;
     while (argv.next()) |arg| {
         if (std.mem.eql(u8, arg, "--block")) {
-            blocks = argv.next() orelse @panic("invalid argv --block");
+            try blocks.append(a, argv.next() orelse usage(arg0, "<config file> missing for --block"));
         } else if (std.mem.eql(u8, arg, "--drop-ip")) {
-            const ip_str = argv.next() orelse @panic("invalid argv --drop-ip");
+            const ip_str = argv.next() orelse usage(arg0, "<ip address> missing for --drop-ip");
             var ip: [4]u8 = undefined;
             var itr = std.mem.splitScalar(u8, ip_str, '.');
             for (&ip) |*oct| {
@@ -146,8 +166,12 @@ pub fn main() !void {
             }
             try blocked_ips.append(a, ip);
         } else if (std.mem.eql(u8, arg, "--drop-domain")) {
-            const domain_str = argv.next() orelse @panic("invalid argv --drop-domain");
+            const domain_str = argv.next() orelse usage(arg0, "<fqdn> missing for --drop-domain");
             try blocked_domains.append(a, try a.dupe(u8, domain_str));
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            usage(arg0, null);
+        } else {
+            usage(arg0, "invalid arg given");
         }
     }
 
@@ -179,7 +203,7 @@ pub fn main() !void {
         .name = try cache.store("ht"),
     });
 
-    if (blocks) |b| {
+    for (blocks.items) |b| {
         a.free(try parse(a, b));
     }
 
