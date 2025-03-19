@@ -28,13 +28,8 @@ fn core(
     upstream: network.Peer,
     blocked_ips: []const [4]u8,
 ) !void {
+    const curr_time: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
     const msg = try DNS.Message.fromBytes(in_msg);
-    var address_bufs: [16]DNS.Message.Resource.RData = undefined;
-    var addresses: std.ArrayListUnmanaged(DNS.Message.Resource.RData) = .{
-        .items = &address_bufs,
-        .capacity = address_bufs.len,
-    };
-    addresses.items.len = 0;
 
     var qdomains: [16][255]u8 = undefined;
     var dbuf: [16][]const u8 = undefined;
@@ -83,14 +78,27 @@ fn core(
                 if (zone.found_existing) {
                     log.err("{} hits on {s}", .{ zone.key_ptr.hits, domain.zone });
                     zone.key_ptr.hits += 1;
+                    var ans_bytes: [512]u8 = undefined;
                     switch (zone.key_ptr.behavior) {
                         .nxdomain => {
-                            var ans_bytes: [512]u8 = undefined;
                             if (msg.header.qdcount == 1) {
                                 const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
                                 try downstream.sendTo(addr, ans.bytes);
                                 return;
                             }
+                        },
+                        .cached => |c_result| {
+                            log.err("cached {s}", .{domain.zone});
+                            if (c_result.ttl > curr_time) {
+                                const ans: DNS.Message = try .answer(
+                                    msg.header.id,
+                                    &[1][]const u8{q.name},
+                                    &[1]DNS.Message.Resource.RData{c_result.addr},
+                                    &ans_bytes,
+                                );
+                                try downstream.sendTo(addr, ans.bytes);
+                                return;
+                            } else log.err("cached {s} ttl expired {}", .{ domain.zone, c_result.ttl });
                         },
                         else => log.err("zone {s}", .{domain.zone}),
                     }
@@ -98,17 +106,11 @@ fn core(
                     std.debug.print("cache missing \n", .{});
                 }
             } else |e| return e;
-
-            addresses.appendAssumeCapacity(.{ .a = .{ 127, 0, 0, 1 } });
         },
         .answer => break,
     };
 
-    var anbuf: [512]u8 = undefined;
-    const answer = try DNS.Message.answer(msg.header.id, domains.items, addresses.items, &anbuf);
-    _ = answer;
-    //log.err("answer = {}", .{answer});
-
+    log.err("hitting upstream {any}", .{upstream.addr});
     //log.info("bounce", .{});
     try upstream.send(in_msg);
     var relay_buf: [1024]u8 = undefined;
@@ -126,21 +128,64 @@ fn core(
     try downstream.sendTo(addr, relay_buf[0..b_cnt]);
 
     const rmsg: DNS.Message = try .fromBytes(relayed);
-    var rit = rmsg.iterator();
+    if (rmsg.header.qdcount != 1) return;
 
+    var lzone: Zone = undefined;
+    var tld: *Zone = undefined;
+    var min_ttl: u32 = 0;
+    min_ttl = ~min_ttl;
+
+    var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
         log.err("relayed iter error {}", .{err});
         log.debug("rdata {any}", .{relayed});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
-            _ = q;
+            const domain: Domain = .init(q.name);
+            tld = f: {
+                if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
+                    if (!goptr.found_existing) {
+                        goptr.key_ptr.* = try a.dupe(u8, domain.tld);
+                        goptr.value_ptr.* = .{
+                            .name = try cache.store(domain.zone),
+                        };
+                    }
+                    goptr.value_ptr.hits += 1;
+                    break :f goptr.value_ptr;
+                } else |err| {
+                    log.err("hash error {}", .{err});
+                    break;
+                }
+            };
+            lzone = .{ .name = try cache.store(domain.zone) };
             //log.err("r question = {s}", .{q.name});
             //log.debug("r question = {}", .{q});
         },
         .answer => |r| {
-            log.err("r question = {s}", .{r.name});
+            min_ttl = @min(min_ttl, r.ttl);
+            log.err("r answer      = {s} ", .{r.name});
+            log.err("r     rtype   = {}", .{r.rtype});
+            log.err("r               {}", .{r.data});
             log.debug("r question = {}", .{r});
+            switch (r.rtype) {
+                .a => {
+                    if (tld.zones.getKeyPtr(lzone)) |zone| {
+                        switch (zone.behavior) {
+                            .new, .cached => {
+                                zone.behavior = .{ .cached = .{
+                                    .ttl = @intCast(curr_time + min_ttl),
+                                    .addr = r.data,
+                                } };
+                            },
+                            .nxdomain => {},
+                        }
+                    }
+                },
+                .aaaa => {},
+                .cname => {},
+                else => {},
+            }
         },
     };
 }
@@ -190,7 +235,7 @@ pub fn main() !void {
         .alloc = a,
     };
 
-    const preload_tlds = [_][]const u8{ "com", "net", "org", "ht" };
+    const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht" };
     for (preload_tlds) |ptld| {
         try cache.tld.put(a, ptld, .{
             .name = try cache.store(ptld),
@@ -257,12 +302,8 @@ pub const Behavior = union(enum) {
     cached: Result,
 
     pub const Result = struct {
-        drop: bool = true,
         ttl: u32,
-        addr: union(enum) {
-            a: [4]u8,
-            aaaa: [16]u8,
-        },
+        addr: DNS.Message.Resource.RData,
     };
 };
 
@@ -321,7 +362,6 @@ const ZoneCache = struct {
 
         if (gop.found_existing) {
             zc.strings.shrinkRetainingCapacity(str_index);
-            std.debug.print("store was existing\n", .{});
             return @enumFromInt(gop.key_ptr.*);
         } else {
             gop.key_ptr.* = str_index;

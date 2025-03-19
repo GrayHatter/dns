@@ -51,6 +51,7 @@ pub const Resource = struct {
             expire: u32,
             minimum: u32,
         },
+        _null: void,
     };
 
     pub fn init(fqdn: []const u8, rdata: RData, ttl: u32) Resource {
@@ -61,6 +62,7 @@ pub const Resource = struct {
                 .aaaa => .aaaa,
                 .cname => .cname,
                 .soa => .soa,
+                ._null => unreachable,
             },
             .class = .in,
             .ttl = ttl,
@@ -97,7 +99,7 @@ pub const Resource = struct {
             .cname => |name| {
                 idx += try Label.writeName(name, w);
             },
-            .soa => unreachable,
+            .soa, ._null => unreachable,
         }
 
         return idx;
@@ -209,15 +211,15 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
                 .soa => .{ .soa = .{
                     .mname = name,
-                    .rname = undefined,
+                    .rname = "",
                     .serial = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
                     .refresh = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
                     .retry = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
                     .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
                     .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
                 } },
-                .EDNS => undefined,
-                .https => undefined,
+                .EDNS => .{ ._null = {} },
+                .https => .{ ._null = {} },
                 else => |err| {
                     log.err("not implemented {}", .{err});
                     return error.ResponseTypeNotImplemented;
