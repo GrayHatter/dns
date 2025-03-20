@@ -103,7 +103,7 @@ fn core(
                         else => log.err("zone {s}", .{domain.zone}),
                     }
                 } else {
-                    log.err("cache missing \n", .{});
+                    log.err("cache missing", .{});
                 }
             } else |e| return e;
         },
@@ -127,6 +127,7 @@ fn core(
     const relayed = relay_buf[0..b_cnt];
     log.info("bounce received {}", .{b_cnt});
     log.debug("bounce data {any}", .{relayed});
+    if (!std.mem.eql(u8, relay_buf[0..2], in_msg[0..2])) return error.OutOfOrderMessages;
 
     for (blocked_ips) |banned| {
         if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
@@ -285,7 +286,7 @@ pub fn main() !void {
         log.debug("data {any}", .{buffer[0..icnt]});
         log.warn("received from {any}", .{addr.in});
         //const current_time = std.time.timestamp();
-        try core(
+        core(
             a,
             &cache,
             buffer[0..icnt],
@@ -293,7 +294,13 @@ pub fn main() !void {
             addr,
             upconns[up_idx],
             blocked_ips.items,
-        );
+        ) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => {
+                log.err("core error: {}", .{err});
+                return err;
+            },
+        };
 
         log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
 
