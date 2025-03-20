@@ -31,14 +31,6 @@ fn core(
     const curr_time: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
     const msg = try DNS.Message.fromBytes(in_msg);
 
-    var qdomains: [16][255]u8 = undefined;
-    var dbuf: [16][]const u8 = undefined;
-    var domains: std.ArrayListUnmanaged([]const u8) = .{
-        .items = &dbuf,
-        .capacity = dbuf.len,
-    };
-    domains.items.len = 0;
-
     if (msg.header.qdcount >= 16) {
         log.err("dropping invalid msg", .{});
         log.debug("that message {any}", .{in_msg});
@@ -48,13 +40,13 @@ fn core(
     var iter = msg.iterator();
     while (iter.next() catch |err| e: {
         log.err("question iter error {}", .{err});
-        log.debug("qdata {any}", .{in_msg});
+        log.err("qdata {any}", .{in_msg});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
             log.err("name {s}", .{q.name});
-            @memcpy(qdomains[iter.index][0..q.name.len], q.name);
-            domains.appendAssumeCapacity(qdomains[iter.index][0..q.name.len]);
+
+            if (q.qtype != .a) continue;
 
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
@@ -88,14 +80,22 @@ fn core(
                             }
                         },
                         .cached => |c_result| {
-                            log.err("cached {s}", .{domain.zone});
+                            log.info("cached {s}", .{domain.zone});
                             if (c_result.ttl > curr_time) {
+                                const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
+                                    .a => .{ .a = c_result.a orelse continue },
+                                    .aaaa => .{ .aaaa = c_result.aaaa orelse continue },
+                                    else => continue,
+                                }};
+
                                 const ans: DNS.Message = try .answer(
                                     msg.header.id,
                                     &[1][]const u8{q.name},
-                                    &[1]DNS.Message.Resource.RData{c_result.addr},
+                                    &rdata,
                                     &ans_bytes,
                                 );
+                                log.debug("cached answer {any}", .{ans.bytes});
+                                //std.time.sleep(100_000);
                                 try downstream.sendTo(addr, ans.bytes);
                                 return;
                             } else log.err("cached {s} ttl expired {}", .{ domain.zone, c_result.ttl });
@@ -103,7 +103,7 @@ fn core(
                         else => log.err("zone {s}", .{domain.zone}),
                     }
                 } else {
-                    std.debug.print("cache missing \n", .{});
+                    log.err("cache missing \n", .{});
                 }
             } else |e| return e;
         },
@@ -116,8 +116,8 @@ fn core(
     var relay_buf: [1024]u8 = undefined;
     const b_cnt = try upstream.recv(&relay_buf);
     const relayed = relay_buf[0..b_cnt];
-    //log.info("bounce received {}", .{b_cnt});
-    //log.debug("bounce data {any}", .{relayed});
+    log.info("bounce received {}", .{b_cnt});
+    log.debug("bounce data {any}", .{relayed});
 
     for (blocked_ips) |banned| {
         if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
@@ -138,7 +138,7 @@ fn core(
     var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
         log.err("relayed iter error {}", .{err});
-        log.debug("rdata {any}", .{relayed});
+        log.err("rdata {any}", .{relayed});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
@@ -166,25 +166,23 @@ fn core(
             min_ttl = @min(min_ttl, r.ttl);
             log.err("r answer      = {s} ", .{r.name});
             log.err("r     rtype   = {}", .{r.rtype});
-            log.err("r               {}", .{r.data});
+            log.debug("r               {}", .{r.data});
             log.debug("r question = {}", .{r});
-            switch (r.rtype) {
-                .a => {
-                    if (tld.zones.getKeyPtr(lzone)) |zone| {
-                        switch (zone.behavior) {
-                            .new, .cached => {
-                                zone.behavior = .{ .cached = .{
-                                    .ttl = @intCast(curr_time + min_ttl),
-                                    .addr = r.data,
-                                } };
-                            },
-                            .nxdomain => {},
+            if (tld.zones.getKeyPtr(lzone)) |zone| {
+                switch (zone.behavior) {
+                    .new, .cached => {
+                        zone.behavior = .{ .cached = .{
+                            .ttl = @intCast(curr_time + min_ttl),
+                        } };
+                        switch (r.rtype) {
+                            .a => zone.behavior.cached.a = r.data.a,
+                            .aaaa => zone.behavior.cached.aaaa = r.data.aaaa,
+                            else => continue,
                         }
-                    }
-                },
-                .aaaa => {},
-                .cname => {},
-                else => {},
+                        break;
+                    },
+                    .nxdomain => {},
+                }
             }
         },
     };
@@ -275,7 +273,7 @@ pub fn main() !void {
         const icnt = try downstream.recvFrom(&buffer, &addr);
         timer.reset();
         log.info("received {}", .{icnt});
-        //log.err("data {any}", .{buffer[0..icnt]});
+        log.debug("data {any}", .{buffer[0..icnt]});
         log.warn("received from {any}", .{addr.in});
         //const current_time = std.time.timestamp();
         try core(
@@ -302,8 +300,9 @@ pub const Behavior = union(enum) {
     cached: Result,
 
     pub const Result = struct {
-        ttl: u32,
-        addr: DNS.Message.Resource.RData,
+        ttl: u32 = 0,
+        a: ?[4]u8 = null,
+        aaaa: ?[16]u8 = null,
     };
 };
 
@@ -394,6 +393,10 @@ const upstreams: [4][4]u8 = .{
     .{ 1, 0, 0, 1 },
     .{ 8, 8, 8, 8 },
     .{ 8, 8, 4, 4 },
+};
+
+pub const std_options: std.Options = .{
+    .log_level = .warn,
 };
 
 fn parseLine(line: []const u8) ![]const u8 {
