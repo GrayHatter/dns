@@ -127,7 +127,13 @@ fn core(
     const relayed = relay_buf[0..b_cnt];
     log.info("bounce received {}", .{b_cnt});
     log.debug("bounce data {any}", .{relayed});
-    if (!std.mem.eql(u8, relay_buf[0..2], in_msg[0..2])) return error.OutOfOrderMessages;
+    if (!std.mem.eql(u8, relay_buf[0..2], in_msg[0..2])) {
+        // drop 2 messages or 2 timeouts
+        _ = upstream.recv(&relay_buf) catch 0;
+        _ = upstream.recv(&relay_buf) catch 0;
+        log.err("out of order messages with upstream {} resetting", .{upstream.addr});
+        return error.OutOfOrderMessages;
+    }
 
     for (blocked_ips) |banned| {
         if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
@@ -296,6 +302,7 @@ pub fn main() !void {
             blocked_ips.items,
         ) catch |err| switch (err) {
             error.WouldBlock => continue,
+            error.OutOfOrderMessages => continue,
             else => {
                 log.err("core error: {}", .{err});
                 return err;
