@@ -114,7 +114,16 @@ fn core(
     //log.info("bounce", .{});
     try upstream.send(in_msg);
     var relay_buf: [1024]u8 = undefined;
-    const b_cnt = try upstream.recv(&relay_buf);
+    const b_cnt = upstream.recv(&relay_buf) catch |err| again: switch (err) {
+        error.WouldBlock => {
+            try upstream.send(in_msg);
+            break :again upstream.recv(&relay_buf) catch |err2| {
+                log.err("unable to communicate with upstream {} timed out twice", .{upstream.addr});
+                return err2;
+            };
+        },
+        else => return err,
+    };
     const relayed = relay_buf[0..b_cnt];
     log.info("bounce received {}", .{b_cnt});
     log.debug("bounce data {any}", .{relayed});

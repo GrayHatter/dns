@@ -2,6 +2,10 @@ pub const Peer = struct {
     addr: std.net.Address,
     sock: std.posix.socket_t,
 
+    const Options = struct {
+        recv_timeout_us: ?u32 = null,
+    };
+
     /// TODO ipv6
     pub fn init(addr_ip: [4]u8, port: u16) !Peer {
         const up: Peer = .{
@@ -14,10 +18,22 @@ pub const Peer = struct {
         return up;
     }
 
-    pub fn connect(addr_ip: [4]u8, port: u16) !Peer {
+    pub fn connectOptions(addr_ip: [4]u8, port: u16, opts: Options) !Peer {
         const up: Peer = try .init(addr_ip, port);
         try std.posix.connect(up.sock, &up.addr.any, up.addr.getOsSockLen());
+        if (opts.recv_timeout_us) |rcvto| {
+            try std.posix.setsockopt(
+                up.sock,
+                sys.SOCKET,
+                sys.RCVTIMEO,
+                asBytes(&sys.timeval{ .sec = 0, .usec = rcvto }),
+            );
+        }
         return up;
+    }
+
+    pub fn connect(addr_ip: [4]u8, port: u16) !Peer {
+        return try connectOptions(addr_ip, port, .{ .recv_timeout_us = 30000 });
     }
 
     pub fn listen(addr_ip: [4]u8, port: u16) !Peer {
@@ -54,5 +70,11 @@ pub const Peer = struct {
 };
 
 const std = @import("std");
+const sys = struct {
+    const timeval = std.os.linux.timeval;
+    const SOCKET = std.os.linux.SOL.SOCKET;
+    const RCVTIMEO = std.os.linux.SO.RCVTIMEO;
+};
+const asBytes = std.mem.asBytes;
 const nativeToBig = std.mem.nativeToBig;
 const bytesToValue = std.mem.bytesToValue;
