@@ -276,10 +276,6 @@ pub fn main() !void {
     }
     var up_idx: u2 = 0;
 
-    //const msg = try DNS.Message.query(a, &[1][]const u8{domain orelse "gr.ht."});
-    //var request: [1024]u8 = undefined;
-    //const msgsize = try msg.write(&request);
-
     var timer: std.time.Timer = try .start();
     while (true) {
         defer up_idx +%= 1;
