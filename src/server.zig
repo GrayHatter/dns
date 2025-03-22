@@ -46,8 +46,6 @@ fn core(
         .question => |q| {
             log.err("name {s}", .{q.name});
 
-            if (q.qtype != .a) continue;
-
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
@@ -116,7 +114,7 @@ fn core(
     var relay_buf: [1024]u8 = undefined;
     const b_cnt = upstream.recv(&relay_buf) catch |err| again: switch (err) {
         error.WouldBlock => {
-            try upstream.send(in_msg);
+            //try upstream.send(in_msg);
             break :again upstream.recv(&relay_buf) catch |err2| {
                 log.err("unable to communicate with upstream {} timed out twice", .{upstream.addr});
                 return err2;
@@ -284,6 +282,7 @@ pub fn main() !void {
 
     var timer: std.time.Timer = try .start();
     while (true) {
+        defer up_idx +%= 1;
         var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
         const icnt = try downstream.recvFrom(&buffer, &addr);
@@ -310,8 +309,6 @@ pub fn main() !void {
         };
 
         log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
-
-        up_idx +%= 1;
     }
 
     log.err("done", .{});

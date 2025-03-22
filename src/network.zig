@@ -33,7 +33,7 @@ pub const Peer = struct {
     }
 
     pub fn connect(addr_ip: [4]u8, port: u16) !Peer {
-        return try connectOptions(addr_ip, port, .{ .recv_timeout_us = 60000 });
+        return try connectOptions(addr_ip, port, .{ .recv_timeout_us = 200000 });
     }
 
     pub fn listen(addr_ip: [4]u8, port: u16) !Peer {
