@@ -6,7 +6,7 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
     std.debug.print(
         \\Usage: {s} [options]
         \\
-        \\Config Options: 
+        \\Config Options:
         \\  -c, --config             - [ ] TODO document
         \\                           - [ ] add config support
         \\
