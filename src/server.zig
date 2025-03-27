@@ -26,7 +26,6 @@ fn core(
     downstream: network.Peer,
     addr: std.net.Address,
     upstream: network.Peer,
-    blocked_ips: []const [4]u8,
 ) !void {
     const curr_time: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
     const msg = try DNS.Message.fromBytes(in_msg);
@@ -202,11 +201,31 @@ fn core(
     };
 }
 
+fn managedCore(
+    a: Allocator,
+    cache: *ZoneCache,
+    in_msg: []const u8,
+    downstream: network.Peer,
+    addr: std.net.Address,
+    upstream: network.Peer,
+) void {
+    core(a, cache, in_msg, downstream, addr, upstream) catch |err| switch (err) {
+        error.WouldBlock => return,
+        error.OutOfOrderMessages => return,
+        else => {
+            log.err("core error: {}", .{err});
+            @panic("unreachable");
+        },
+    };
+}
+
+var blocked_ips: []const [4]u8 = &[0][4]u8{};
+
 pub fn main() !void {
     const a = std.heap.smp_allocator;
 
     var blocks: std.ArrayListUnmanaged([]const u8) = .{};
-    var blocked_ips: std.ArrayListUnmanaged([4]u8) = .{};
+    var blocked_ips_: std.ArrayListUnmanaged([4]u8) = .{};
     var blocked_domains: std.ArrayListUnmanaged([]const u8) = .{};
 
     var argv = std.process.args();
@@ -221,7 +240,7 @@ pub fn main() !void {
             for (&ip) |*oct| {
                 oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
             }
-            try blocked_ips.append(a, ip);
+            try blocked_ips_.append(a, ip);
         } else if (std.mem.eql(u8, arg, "--drop-domain")) {
             const domain_str = argv.next() orelse usage(arg0, "<fqdn> missing for --drop-domain");
             try blocked_domains.append(a, try a.dupe(u8, domain_str));
@@ -231,6 +250,7 @@ pub fn main() !void {
             usage(arg0, "invalid arg given");
         }
     }
+    blocked_ips = blocked_ips_.items;
 
     const downstream: network.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
 
@@ -276,6 +296,9 @@ pub fn main() !void {
     }
     var up_idx: u2 = 0;
 
+    var tpool: std.Thread.Pool = undefined;
+    try tpool.init(.{ .allocator = a, .n_jobs = 4 });
+
     var timer: std.time.Timer = try .start();
     while (true) {
         defer up_idx +%= 1;
@@ -287,6 +310,8 @@ pub fn main() !void {
         log.debug("data {any}", .{buffer[0..icnt]});
         log.warn("received from {any}", .{addr.in});
         //const current_time = std.time.timestamp();
+        //try tpool.spawn(managedCore, .{ a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx] });
+
         core(
             a,
             &cache,
@@ -294,7 +319,6 @@ pub fn main() !void {
             downstream,
             addr,
             upconns[up_idx],
-            blocked_ips.items,
         ) catch |err| switch (err) {
             error.WouldBlock => continue,
             error.OutOfOrderMessages => continue,
