@@ -278,6 +278,12 @@ pub fn main() !void {
         a.free(try parse(a, b));
     }
 
+    const file_hosts = try readFile("/etc/hosts");
+    std.debug.print("file \n{s}\n", .{file_hosts});
+    const host_lines = try parse(a, file_hosts);
+    for (host_lines) |line| std.debug.print("host line {any}\n", .{line});
+    a.free(host_lines);
+
     for (blocked_domains.items) |dd| {
         const domain: Domain = .init(dd);
         log.err("tld {s}", .{domain.tld});
@@ -334,10 +340,34 @@ pub fn main() !void {
     log.err("done", .{});
 }
 
+fn readFile(name: []const u8) ![]const u8 {
+    var file = try std.fs.cwd().openFile(name, .{ .mode = .read_only });
+    defer file.close();
+    return try mmap(file);
+}
+
+fn mmap(fd: std.fs.File) ![]const u8 {
+    const stat = try fd.stat();
+
+    const ptr: [*]u8 = @ptrFromInt(std.os.linux.mmap(
+        null,
+        stat.size,
+        std.os.linux.PROT.READ,
+        std.os.linux.MAP{ .TYPE = .PRIVATE },
+        fd.handle,
+        0,
+    ));
+    return ptr[0..stat.size];
+}
+
+fn munmap(ptr: []const u8) !void {
+    std.os.linux.munmap(ptr.ptr, ptr.len);
+}
+
 pub const Behavior = union(enum) {
     new: void,
     nxdomain: u32,
-    cached: Result,
+    cached: Behavior.Result,
 
     pub const Result = struct {
         ttl: u32 = 0,
@@ -439,19 +469,68 @@ pub const std_options: std.Options = .{
     .log_level = .warn,
 };
 
-fn parseLine(line: []const u8) ![]const u8 {
-    if (line[0] == '#') return error.Skip;
-    return line;
+const Result = struct {
+    fqdn: []const u8,
+    addr: union(enum) {
+        a: [4]u8,
+        aaaa: [16]u8,
+    },
+};
+
+fn parseA() void {}
+
+fn parseAAAA() void {}
+
+fn parseFQDN(in: []const u8) ![]const u8 {
+    const trimmed = std.mem.trim(u8, in, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.NoFQDN;
+    var end: usize = 0;
+    for (trimmed) |char| {
+        switch (char) {
+            'a'...'z',
+            'A'...'Z',
+            '0'...'9',
+            '-',
+            '.',
+            => {},
+            ' ', '\t', '\n' => break,
+            else => return error.InvalidChar,
+        }
+        end += 1;
+    }
+
+    if (end == 0) return error.NoFQDN;
+    return trimmed[0..end];
 }
 
-fn parse(a: Allocator, filename: []const u8) ![][]const u8 {
-    var file = try std.fs.cwd().openFile(filename, .{});
-    defer file.close();
-    const fsize = try file.getEndPos();
+fn parseLine(line: []const u8) !Result {
+    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    if (trimmed.len == 0) return error.Skip;
+    if (trimmed[0] == '#') {
+        log.debug("skip '{s}'", .{line});
+        return error.Skip;
+    }
+
+    const name = if (indexOfAny(u8, trimmed, &std.ascii.whitespace)) |i| parseFQDN(trimmed[i..]) catch |err| {
+        log.debug("fqdn error {}", .{err});
+        return error.Skip;
+    } else return error.Skip;
+
+    if (indexOfScalar(u8, trimmed, ':')) |_| {
+        return .{ .fqdn = name, .addr = .{ .aaaa = @splat(0) } };
+    } else {
+        return .{ .fqdn = name, .addr = .{ .a = @splat(0) } };
+    }
+}
+
+fn parse(a: Allocator, blob: []const u8) ![]Result {
     // 21 bytes per line for the test file
-    const base_count = fsize / 21;
-    var reader = file.reader();
-    var list = try std.ArrayListUnmanaged([]const u8).initCapacity(a, base_count);
+    const base_count = blob.len / 21;
+
+    var fbs = std.io.fixedBufferStream(blob);
+    var reader = fbs.reader();
+
+    var list = try std.ArrayListUnmanaged(Result).initCapacity(a, base_count);
     errdefer list.clearAndFree(a);
     var lbuf: [1024]u8 = undefined;
 
@@ -472,4 +551,5 @@ const network = @import("network.zig");
 const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
+const indexOfAny = std.mem.indexOfAny;
 const indexOfScalar = std.mem.indexOfScalar;
