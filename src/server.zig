@@ -27,7 +27,7 @@ fn core(
     addr: std.net.Address,
     upstream: network.Peer,
 ) !void {
-    const curr_time: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
+    const now: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
     const msg = try DNS.Message.fromBytes(in_msg);
 
     if (msg.header.qdcount >= 16) {
@@ -43,7 +43,7 @@ fn core(
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
-            log.err("name {s}", .{q.name});
+            log.debug("name {s}", .{q.name});
 
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
@@ -65,7 +65,7 @@ fn core(
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
             if (tld.zones.getOrPut(a, lzone)) |zone| {
                 if (zone.found_existing) {
-                    log.err("{} hits on {s}", .{ zone.key_ptr.hits, domain.zone });
+                    log.err("{} hits for domain {s}", .{ zone.key_ptr.hits, q.name });
                     zone.key_ptr.hits += 1;
                     var ans_bytes: [512]u8 = undefined;
                     switch (zone.key_ptr.behavior) {
@@ -78,7 +78,7 @@ fn core(
                         },
                         .cached => |c_result| {
                             log.info("cached {s}", .{domain.zone});
-                            if (c_result.ttl > curr_time) {
+                            if (c_result.ttl > now) {
                                 const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
                                     .a => .{ .a = c_result.a orelse continue },
                                     .aaaa => .{ .aaaa = c_result.aaaa orelse continue },
@@ -95,7 +95,7 @@ fn core(
                                 //std.time.sleep(100_000);
                                 try downstream.sendTo(addr, ans.bytes);
                                 return;
-                            } else log.err("cached {s} ttl expired {}", .{ domain.zone, c_result.ttl });
+                            } else log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
                         },
                         else => log.err("zone {s}", .{domain.zone}),
                     }
@@ -107,7 +107,7 @@ fn core(
         .answer => break,
     };
 
-    log.err("hitting upstream {any}", .{upstream.addr});
+    log.err("hitting upstream {any}", .{@as(*const [4]u8, @ptrCast(&upstream.addr.in.sa.addr))});
     //log.info("bounce", .{});
     try upstream.send(in_msg);
     var relay_buf: [1024]u8 = undefined;
@@ -177,15 +177,14 @@ fn core(
         },
         .answer => |r| {
             min_ttl = @min(min_ttl, r.ttl);
-            log.err("r answer      = {s} ", .{r.name});
-            log.err("r     rtype   = {}", .{r.rtype});
+            log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = {}", .{r});
             if (tld.zones.getKeyPtr(lzone)) |zone| {
                 switch (zone.behavior) {
                     .new, .cached => {
                         zone.behavior = .{ .cached = .{
-                            .ttl = @intCast(curr_time + min_ttl),
+                            .ttl = @intCast(now + min_ttl),
                         } };
                         switch (r.rtype) {
                             .a => zone.behavior.cached.a = r.data.a,
@@ -319,18 +318,11 @@ pub fn main() !void {
         timer.reset();
         log.info("received {}", .{icnt});
         log.debug("data {any}", .{buffer[0..icnt]});
-        log.warn("received from {any}", .{addr.in});
+        log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&addr.in.sa.addr))});
         //const current_time = std.time.timestamp();
         //try tpool.spawn(managedCore, .{ a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx] });
 
-        core(
-            a,
-            &cache,
-            buffer[0..icnt],
-            downstream,
-            addr,
-            upconns[up_idx],
-        ) catch |err| switch (err) {
+        core(a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx]) catch |err| switch (err) {
             error.WouldBlock => continue,
             error.OutOfOrderMessages => continue,
             else => {
@@ -339,7 +331,7 @@ pub fn main() !void {
             },
         };
 
-        log.err("responded {d}", .{@as(f64, @floatFromInt(timer.lap())) / 1000});
+        log.err("{f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
     }
 
     log.err("done", .{});
@@ -491,6 +483,13 @@ pub const std_options: std.Options = .{
 const RecordAddress = union(enum) {
     a: [4]u8,
     aaaa: [16]u8,
+
+    pub fn format(addr: RecordAddress, w: *std.Io.Writer) !void {
+        switch (addr) {
+            .a => |a| try w.print("{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }),
+            .aaaa => |aaaa| try w.print("{x}", .{aaaa}),
+        }
+    }
 };
 
 const Result = struct {
