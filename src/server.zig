@@ -80,32 +80,32 @@ fn core(
                         },
                         .cached => |c_result| {
                             log.info("cached {s}", .{domain.zone});
-                            if (c_result.ttl > now) {
-                                const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
-                                    .a => .{ .a = c_result.a orelse {
-                                        log.err("a request is null {s}", .{domain.zone});
-                                        continue;
-                                    } },
-                                    .aaaa => .{ .aaaa = c_result.aaaa orelse {
-                                        log.err("aaaa request is null {s}", .{domain.zone});
-                                        continue;
-                                    } },
-                                    else => break,
-                                }};
-
-                                const ans: DNS.Message = try .answer(
-                                    msg.header.id,
-                                    &[1][]const u8{q.name},
-                                    &rdata,
-                                    &ans_bytes,
-                                );
-                                log.info("cached answer {any}", .{ans.bytes});
-                                //std.time.sleep(100_000);
-                                try downstream.sendTo(addr, ans.bytes);
-                                return true;
-                            } else {
+                            if (c_result.ttl < now) {
                                 log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+                                break;
                             }
+                            const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
+                                .a => .{ .a = c_result.a orelse {
+                                    log.err("a request is null {s}", .{domain.zone});
+                                    continue;
+                                } },
+                                .aaaa => .{ .aaaa = c_result.aaaa orelse {
+                                    log.err("aaaa request is null {s}", .{domain.zone});
+                                    continue;
+                                } },
+                                else => break,
+                            }};
+
+                            const ans: DNS.Message = try .answer(
+                                msg.header.id,
+                                &[1][]const u8{q.name},
+                                &rdata,
+                                &ans_bytes,
+                            );
+                            log.info("cached answer {any}", .{ans.bytes});
+                            //std.time.sleep(100_000);
+                            try downstream.sendTo(addr, ans.bytes);
+                            return true;
                         },
                         else => log.err("zone {s}", .{domain.zone}),
                     }
@@ -198,7 +198,7 @@ fn core(
                             .a = if (r.rtype == .a) r.data.a else null,
                             .aaaa = if (r.rtype == .aaaa) r.data.aaaa else null,
                         } };
-                        break;
+                        continue;
                     },
                     .cached => {
                         zone.behavior.cached = .{
@@ -206,7 +206,7 @@ fn core(
                             .a = if (r.rtype == .a) r.data.a else zone.behavior.cached.a,
                             .aaaa = if (r.rtype == .aaaa) r.data.aaaa else zone.behavior.cached.aaaa,
                         };
-                        break;
+                        continue;
                     },
                     .nxdomain => {},
                 }
