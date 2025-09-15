@@ -303,7 +303,7 @@ pub fn main() !void {
 
     var upconns: [4]network.Peer = undefined;
     for (&upconns, upstreams) |*dst, ip| {
-        dst.* = try .connect(ip, 53);
+        dst.* = try .connect(ip.addr.v4, 53);
     }
     var up_idx: u2 = 0;
 
@@ -463,23 +463,39 @@ pub const Domain = struct {
     }
 };
 
-const upstreams: [4][4]u8 = .{
-    .{ 1, 1, 1, 1 },
-    .{ 1, 0, 0, 1 },
-    .{ 8, 8, 8, 8 },
-    .{ 8, 8, 4, 4 },
+const NetAddress = union(enum) {
+    v4: [4]u8,
+    v6: [16]u8,
+};
+
+const DaemonPeer = struct {
+    addr: NetAddress,
+
+    pub const cloudflare_0: DaemonPeer = .{ .addr = .{ .v4 = .{ 1, 1, 1, 1 } } };
+    pub const cloudflare_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 1, 0, 0, 1 } } };
+    pub const google_0: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 8, 8 } } };
+    pub const google_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 4, 4 } } };
+};
+
+const upstreams: [4]DaemonPeer = .{
+    .cloudflare_0,
+    .cloudflare_1,
+    .google_0,
+    .google_1,
 };
 
 pub const std_options: std.Options = .{
     .log_level = .warn,
 };
 
+const RecordAddress = union(enum) {
+    a: [4]u8,
+    aaaa: [16]u8,
+};
+
 const Result = struct {
     fqdn: []const u8,
-    addr: union(enum) {
-        a: [4]u8,
-        aaaa: [16]u8,
-    },
+    addr: RecordAddress,
 };
 
 fn parseA() void {}
