@@ -115,7 +115,7 @@ fn core(
         error.WouldBlock => {
             //try upstream.send(in_msg);
             break :again upstream.recv(&relay_buf) catch |err2| {
-                log.err("unable to communicate with upstream {} timed out twice", .{upstream.addr});
+                log.err("unable to communicate with upstream {f} timed out twice", .{upstream.addr});
                 return err2;
             };
         },
@@ -128,7 +128,7 @@ fn core(
         // drop 2 messages or 2 timeouts
         _ = upstream.recv(&relay_buf) catch 0;
         _ = upstream.recv(&relay_buf) catch 0;
-        log.err("out of order messages with upstream {} resetting", .{upstream.addr});
+        log.err("out of order messages with upstream {f} resetting", .{upstream.addr});
         return error.OutOfOrderMessages;
     }
 
@@ -263,11 +263,9 @@ pub fn main() !void {
 
     log.err("started", .{});
 
-    var cache: ZoneCache = .{
-        .alloc = a,
-    };
+    var cache: ZoneCache = .{ .alloc = a };
 
-    const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht" };
+    const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht", "rs" };
     for (preload_tlds) |ptld| {
         try cache.tld.put(a, ptld, .{
             .name = try cache.store(ptld),
@@ -281,13 +279,20 @@ pub fn main() !void {
     const file_hosts = try readFile("/etc/hosts");
     std.debug.print("file \n{s}\n", .{file_hosts});
     const host_lines = try parse(a, file_hosts);
-    for (host_lines) |line| std.debug.print("host line {any}\n", .{line});
+    for (host_lines) |line|
+        std.debug.print("host line {any}\n", .{line});
     a.free(host_lines);
 
     for (blocked_domains.items) |dd| {
         const domain: Domain = .init(dd);
         log.err("tld {s}", .{domain.tld});
-        var tld = cache.tld.getPtr(domain.tld).?;
+        const tldgop = try cache.tld.getOrPut(a, domain.tld);
+        if (!tldgop.found_existing) {
+            tldgop.value_ptr.* = .{
+                .name = try cache.store(domain.tld),
+            };
+        }
+        var tld = tldgop.value_ptr;
         log.err("zone {s}", .{domain.zone});
         const str = try cache.store(domain.zone);
         _ = try tld.zones.getOrPut(a, .{
@@ -395,7 +400,7 @@ const Zone = struct {
 
     pub const Hasher = struct {
         pub fn hash(_: Hasher, a: Zone) u32 {
-            return @truncate(std.hash.uint32(@intFromEnum(a.name)));
+            return @truncate(std.hash.int(@intFromEnum(a.name)));
         }
 
         pub fn eql(_: Hasher, a: Zone, b: Zone, _: usize) bool {

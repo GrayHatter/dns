@@ -1,8 +1,9 @@
 .{
     .name = .dns,
     .version = "0.0.0",
+    .minimum_zig_version = "0.15.1",
     .fingerprint = 0x82eddc4155c08ec3,
-    .dependencies = .{ },
+    .dependencies = .{},
     .paths = .{
         "build.zig",
         "build.zig.zon",
