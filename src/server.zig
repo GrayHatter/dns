@@ -276,10 +276,11 @@ pub fn main() !void {
     }
 
     const file_hosts = try readFile("/etc/hosts");
-    std.debug.print("file \n{s}\n", .{file_hosts});
+    log.debug("file\n {s}", .{file_hosts});
     const host_lines = try parse(a, file_hosts);
-    for (host_lines) |line|
-        std.debug.print("host line {any}\n", .{line});
+    for (host_lines) |line| {
+        std.debug.print("host line {s} {f}\n", .{ line.fqdn, line.addr });
+    }
     a.free(host_lines);
 
     for (blocked_domains.items) |dd| {
@@ -497,9 +498,25 @@ const Result = struct {
     addr: RecordAddress,
 };
 
-fn parseA() void {}
+fn parseA(str: []const u8) !RecordAddress {
+    switch (std.mem.count(u8, str, ".")) {
+        else => return error.InvalidAddress,
+        1...2 => return error.NotImplemented,
+        3 => {},
+    }
+    var addr: RecordAddress = .{ .a = @splat(0) };
+    var itr = std.mem.tokenizeScalar(u8, str, '.');
+    var i: u8 = 0;
+    while (itr.next()) |oct| {
+        addr.a[i] = try std.fmt.parseInt(u8, oct, 10);
+        i += 1;
+    }
+    return addr;
+}
 
-fn parseAAAA() void {}
+fn parseAAAA(_: []const u8) !RecordAddress {
+    return .{ .aaaa = @splat(0) };
+}
 
 fn parseFQDN(in: []const u8) ![]const u8 {
     const trimmed = std.mem.trim(u8, in, &std.ascii.whitespace);
@@ -523,7 +540,7 @@ fn parseFQDN(in: []const u8) ![]const u8 {
     return trimmed[0..end];
 }
 
-fn parseLine(line: []const u8) !Result {
+fn parseLine(a: Allocator, line: []const u8, list: *ArrayList(Result)) !void {
     const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
     if (trimmed.len == 0) return error.Skip;
     if (trimmed[0] == '#') {
@@ -531,31 +548,51 @@ fn parseLine(line: []const u8) !Result {
         return error.Skip;
     }
 
-    const name = if (indexOfAny(u8, trimmed, &std.ascii.whitespace)) |i| parseFQDN(trimmed[i..]) catch |err| {
-        log.debug("fqdn error {}", .{err});
-        return error.Skip;
-    } else return error.Skip;
+    if (indexOfAny(u8, trimmed, &std.ascii.whitespace)) |i| {
+        const addr = trimmed[0..i];
+        const names = std.mem.trim(u8, trimmed[i..], &std.ascii.whitespace);
 
-    if (indexOfScalar(u8, trimmed, ':')) |_| {
-        return .{ .fqdn = name, .addr = .{ .aaaa = @splat(0) } };
-    } else {
-        return .{ .fqdn = name, .addr = .{ .a = @splat(0) } };
+        const r_addr = if (indexOfScalar(u8, addr, ':')) |_|
+            try parseAAAA(std.mem.trim(u8, addr, &std.ascii.whitespace))
+        else
+            try parseA(std.mem.trim(u8, addr, &std.ascii.whitespace));
+
+        var names_itr = std.mem.tokenizeAny(u8, names, &std.ascii.whitespace);
+        while (names_itr.next()) |name| {
+            const parsed = parseFQDN(name) catch |err| {
+                log.err("fqdn error {}", .{err});
+                continue;
+            };
+            try list.append(a, .{ .fqdn = parsed, .addr = r_addr });
+        }
     }
+}
+
+test parseLine {
+    const a = std.testing.allocator;
+    var list: ArrayList(Result) = .{};
+    defer list.clearAndFree(a);
+
+    try parseLine(a, "127.0.0.1 blerg", &list);
+
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[0]);
+    try parseLine(a, "127.0.0.1 blerg blerg blerg", &list);
+    try std.testing.expectEqual(@as(usize, 4), list.items.len);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[1]);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[2]);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[3]);
 }
 
 fn parse(a: Allocator, blob: []const u8) ![]Result {
     // 21 bytes per line for the test file
     const base_count = blob.len / 21;
-
-    var fbs = std.io.fixedBufferStream(blob);
-    var reader = fbs.reader();
-
-    var list = try std.ArrayListUnmanaged(Result).initCapacity(a, base_count);
+    var list: ArrayList(Result) = try .initCapacity(a, base_count);
     errdefer list.clearAndFree(a);
-    var lbuf: [1024]u8 = undefined;
 
-    while (try reader.readUntilDelimiterOrEof(&lbuf, '\n')) |line| {
-        try list.append(a, parseLine(line) catch continue);
+    var lines_itr = std.mem.tokenizeScalar(u8, blob, '\n');
+    while (lines_itr.next()) |line| {
+        parseLine(a, line, &list) catch continue;
     }
 
     return try list.toOwnedSlice(a);
@@ -571,5 +608,6 @@ const network = @import("network.zig");
 const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 const indexOfAny = std.mem.indexOfAny;
 const indexOfScalar = std.mem.indexOfScalar;
