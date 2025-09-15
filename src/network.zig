@@ -68,7 +68,7 @@ pub const Peer = struct {
         return cnt;
     }
 
-    pub fn format(peer: Peer, w: *std.Io.Writer) !void {
+    pub fn format(peer: Peer, w: *Writer) !void {
         const a: *const [4]u8 = @ptrCast(&peer.addr.in.sa.addr);
         try w.print("{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] });
     }
@@ -83,3 +83,4 @@ const sys = struct {
 const asBytes = std.mem.asBytes;
 const nativeToBig = std.mem.nativeToBig;
 const bytesToValue = std.mem.bytesToValue;
+const Writer = std.Io.Writer;

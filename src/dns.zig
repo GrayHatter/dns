@@ -56,7 +56,7 @@ pub const Label = struct {
         @panic("unreachable");
     }
 
-    pub fn writeName(name: []const u8, w: *std.io.AnyWriter) !usize {
+    pub fn writeName(name: []const u8, w: *Writer) !usize {
         var itr = std.mem.splitScalar(u8, name, '.');
         var len: usize = 0;
         while (itr.next()) |n| {
@@ -75,15 +75,13 @@ pub const Label = struct {
 
     test writeName {
         var buffer: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buffer);
-        var writer = fbs.writer();
-        var w = writer.any();
+        var w: Writer = .fixed(&buffer);
 
         try std.testing.expectEqual(try writeName("gr.ht", &w), 7);
         try std.testing.expectEqual(try writeName("gr.ht.", &w), 7);
     }
 
-    pub fn write(l: Label, w: *std.io.AnyWriter) !void {
+    pub fn write(l: Label, w: *Writer) !void {
         try w.writeByte(l.len);
         try w.writeAll(l.name);
     }
@@ -364,16 +362,8 @@ test "grht vectors" {
     try std.testing.expectEqual(msg1.header.ancount, 0);
 }
 
-test "fuzz example" {
-    //const global = struct {
-    //    fn testOne(input: []const u8) anyerror!void {
-    //        try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-    //    }
-    //};
-    //try std.testing.fuzz(global.testOne, .{});
-}
-
 const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
 const indexOfScalar = std.mem.indexOfScalar;
+const Writer = std.Io.Writer;

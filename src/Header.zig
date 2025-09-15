@@ -44,12 +44,28 @@ pub const Header = packed struct(u96) {
         };
     }
 
-    pub fn write(h: Header, w: *std.io.AnyWriter) !usize {
+    pub fn write(h: Header, w: *Writer) !usize {
         try w.writeInt(u96, @bitCast(h), .big);
         std.debug.assert(@sizeOf(Header) == 16);
         std.debug.assert(@divExact(@typeInfo(u96).int.bits, 8) == 12);
         return 12;
     }
+
+    pub const answer: Header = .{
+        .id = 0,
+        .qr = true,
+        .opcode = 0,
+        .aa = true,
+        .tc = false,
+        .rd = true,
+        .ra = true,
+        .rcode = .name,
+        .qdcount = 0,
+        .ancount = 0,
+        .nscount = 0,
+        .arcount = 0,
+    };
 };
 
 const std = @import("std");
+const Writer = std.Io.Writer;

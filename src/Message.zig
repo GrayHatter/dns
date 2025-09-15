@@ -23,7 +23,7 @@ pub const Question = struct {
         };
     }
 
-    pub fn write(q: Question, w: *std.io.AnyWriter) !usize {
+    pub fn write(q: Question, w: *Writer) !usize {
         const len = try Label.writeName(q.name, w);
         try w.writeInt(u16, @intFromEnum(q.qtype), .big);
         try w.writeInt(u16, @intFromEnum(q.class), .big);
@@ -70,7 +70,7 @@ pub const Resource = struct {
         };
     }
 
-    pub fn write(r: Resource, w: *std.io.AnyWriter, mptr: ?u14) !usize {
+    pub fn write(r: Resource, w: *Writer, mptr: ?u14) !usize {
         var idx: usize = 0;
         if (mptr) |p| {
             const ptr: u16 = 0xc000 | @as(u16, p);
@@ -258,9 +258,7 @@ pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
         .bytes = buffer,
     };
 
-    var fbs = std.io.fixedBufferStream(buffer);
-    var writer = fbs.writer();
-    var w = writer.any();
+    var w: Writer = .fixed(buffer);
     var idx = try msg.write(&w);
     for (fqdns) |fqdn| {
         const q: Question = .init(fqdn);
@@ -271,24 +269,13 @@ pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
 }
 
 pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Resource.RData, bytes: []u8) !Message {
-    var h: Header = .{
-        .id = id,
-        .qr = true,
-        .opcode = 0,
-        .aa = true,
-        .tc = false,
-        .rd = true,
-        .ra = true,
-        .rcode = if (ips.len == 0) .name else .success,
-        .qdcount = @intCast(fqdns.len),
-        .ancount = @intCast(ips.len),
-        .nscount = 0,
-        .arcount = 0,
-    };
+    var h: Header = .answer;
+    h.id = id;
+    h.rcode = if (ips.len == 0) .name else .success;
+    h.qdcount = @intCast(fqdns.len);
+    h.ancount = @intCast(ips.len);
 
-    var fbs = std.io.fixedBufferStream(bytes);
-    var writer = fbs.writer();
-    var w = writer.any();
+    var w: Writer = .fixed(bytes);
     var idx = try h.write(&w);
 
     var pbufs: [8]u14 = @splat(0);
@@ -317,7 +304,7 @@ pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
     return try answer(id, &[1][]const u8{fqdn}, &[0]Resource.RData{}, bytes);
 }
 
-pub fn write(m: Message, w: *std.io.AnyWriter) !usize {
+pub fn write(m: Message, w: *Writer) !usize {
     const hlen = try m.header.write(w);
     std.debug.assert(hlen == 12);
     return hlen;
@@ -336,3 +323,4 @@ const Label = @import("dns.zig").Label;
 
 const std = @import("std");
 const log = std.log;
+const Writer = std.Io.Writer;
