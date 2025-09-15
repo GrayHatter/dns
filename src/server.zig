@@ -26,14 +26,14 @@ fn core(
     downstream: network.Peer,
     addr: std.net.Address,
     upstream: network.Peer,
-) !void {
+) !bool {
     const now: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
     const msg = try DNS.Message.fromBytes(in_msg);
 
     if (msg.header.qdcount >= 16) {
         log.err("dropping invalid msg", .{});
         log.debug("that message {any}", .{in_msg});
-        return;
+        return true;
     }
 
     var iter = msg.iterator();
@@ -64,25 +64,33 @@ fn core(
 
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
             if (tld.zones.getOrPut(a, lzone)) |zone| {
+                zone.key_ptr.hits += 1;
                 if (zone.found_existing) {
                     log.err("{} hits for domain {s}", .{ zone.key_ptr.hits, q.name });
-                    zone.key_ptr.hits += 1;
                     var ans_bytes: [512]u8 = undefined;
                     switch (zone.key_ptr.behavior) {
                         .nxdomain => {
                             if (msg.header.qdcount == 1) {
                                 const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
                                 try downstream.sendTo(addr, ans.bytes);
-                                return;
+                                log.err("dropping request for {s}", .{q.name});
+                                return true;
                             }
+                            log.err("unable to drop complex record for {s}", .{q.name});
                         },
                         .cached => |c_result| {
                             log.info("cached {s}", .{domain.zone});
                             if (c_result.ttl > now) {
                                 const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
-                                    .a => .{ .a = c_result.a orelse continue },
-                                    .aaaa => .{ .aaaa = c_result.aaaa orelse continue },
-                                    else => continue,
+                                    .a => .{ .a = c_result.a orelse {
+                                        log.err("a request is null {s}", .{domain.zone});
+                                        continue;
+                                    } },
+                                    .aaaa => .{ .aaaa = c_result.aaaa orelse {
+                                        log.err("aaaa request is null {s}", .{domain.zone});
+                                        continue;
+                                    } },
+                                    else => break,
                                 }};
 
                                 const ans: DNS.Message = try .answer(
@@ -91,16 +99,18 @@ fn core(
                                     &rdata,
                                     &ans_bytes,
                                 );
-                                log.debug("cached answer {any}", .{ans.bytes});
+                                log.info("cached answer {any}", .{ans.bytes});
                                 //std.time.sleep(100_000);
                                 try downstream.sendTo(addr, ans.bytes);
-                                return;
-                            } else log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+                                return true;
+                            } else {
+                                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+                            }
                         },
                         else => log.err("zone {s}", .{domain.zone}),
                     }
                 } else {
-                    log.err("cache missing", .{});
+                    log.err("cache missing going to upstream", .{});
                 }
             } else |e| return e;
         },
@@ -141,7 +151,7 @@ fn core(
     try downstream.sendTo(addr, relay_buf[0..b_cnt]);
 
     const rmsg: DNS.Message = try .fromBytes(relayed);
-    if (rmsg.header.qdcount != 1) return;
+    if (rmsg.header.qdcount != 1) return false;
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
@@ -182,15 +192,20 @@ fn core(
             log.debug("r question = {}", .{r});
             if (tld.zones.getKeyPtr(lzone)) |zone| {
                 switch (zone.behavior) {
-                    .new, .cached => {
+                    .new => {
                         zone.behavior = .{ .cached = .{
                             .ttl = @intCast(now + min_ttl),
+                            .a = if (r.rtype == .a) r.data.a else null,
+                            .aaaa = if (r.rtype == .aaaa) r.data.aaaa else null,
                         } };
-                        switch (r.rtype) {
-                            .a => zone.behavior.cached.a = r.data.a,
-                            .aaaa => zone.behavior.cached.aaaa = r.data.aaaa,
-                            else => continue,
-                        }
+                        break;
+                    },
+                    .cached => {
+                        zone.behavior.cached = .{
+                            .ttl = @intCast(now + min_ttl),
+                            .a = if (r.rtype == .a) r.data.a else zone.behavior.cached.a,
+                            .aaaa = if (r.rtype == .aaaa) r.data.aaaa else zone.behavior.cached.aaaa,
+                        };
                         break;
                     },
                     .nxdomain => {},
@@ -198,6 +213,7 @@ fn core(
             }
         },
     };
+    return false;
 }
 
 fn managedCore(
@@ -323,7 +339,7 @@ pub fn main() !void {
         //const current_time = std.time.timestamp();
         //try tpool.spawn(managedCore, .{ a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx] });
 
-        core(a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx]) catch |err| switch (err) {
+        const cached = core(a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx]) catch |err| switch (err) {
             error.WouldBlock => continue,
             error.OutOfOrderMessages => continue,
             else => {
@@ -331,8 +347,11 @@ pub fn main() !void {
                 return err;
             },
         };
-
-        log.err("{f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+        if (cached) {
+            log.err("cached response {d}us", .{timer.lap() / 1000});
+        } else {
+            log.err("{f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+        }
     }
 
     log.err("done", .{});
