@@ -46,8 +46,8 @@ fn cachedAnswer(
             return false;
         },
         .cached => |c_result| {
-            if (c_result.ttl < now) {
-                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+            if (c_result.ttl.expired(now)) {
+                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - @intFromEnum(c_result.ttl), c_result.ttl });
                 return false;
             }
             switch (qtype) {
@@ -196,8 +196,7 @@ fn core(
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
-    var min_ttl: u32 = 0;
-    min_ttl = ~min_ttl;
+    var ttl: DNS.Message.TTL = .zero;
 
     var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
@@ -227,7 +226,7 @@ fn core(
             //log.debug("r question = {}", .{q});
         },
         .answer => |r| {
-            min_ttl = @min(min_ttl, r.ttl);
+            ttl = ttl.min(r.ttl);
             log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = {}", .{r});
@@ -239,15 +238,15 @@ fn core(
                 switch (zone.behavior) {
                     .new => {
                         zone.behavior = .{
-                            .cached = .{ .ttl = @intCast(now + min_ttl), .a = .{}, .aaaa = .{} },
+                            .cached = .{ .ttl = @enumFromInt(now + @intFromEnum(ttl)), .a = .{}, .aaaa = .{} },
                         };
                     },
                     .cached => {
-                        if (zone.behavior.cached.ttl < now) {
+                        if (zone.behavior.cached.ttl.expired(now)) {
                             zone.behavior.cached.a.clearRetainingCapacity();
                             zone.behavior.cached.aaaa.clearRetainingCapacity();
                         }
-                        zone.behavior.cached.ttl = @intCast(now + min_ttl);
+                        zone.behavior.cached.ttl = @enumFromInt(now + @intFromEnum(ttl));
                     },
                     .nxdomain => {},
                 }
@@ -435,7 +434,7 @@ pub const Behavior = union(enum) {
     cached: Behavior.Result,
 
     pub const Result = struct {
-        ttl: u32 = 0,
+        ttl: DNS.Message.TTL = .zero,
         a: ArrayList(IPv4) = .{},
         aaaa: ArrayList(IPv6) = .{},
     };

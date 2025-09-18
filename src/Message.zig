@@ -5,6 +5,30 @@ bytes: []const u8,
 
 pub const Header = @import("Header.zig").Header;
 
+pub const TTL = enum(u32) {
+    zero = 0,
+    @"5min" = 300,
+    @"10min" = 600,
+    _,
+
+    pub fn expired(ttl: TTL, now: i64) bool {
+        const ttl_s: usize = @intFromEnum(ttl);
+        return ttl_s < now;
+    }
+
+    pub fn seconds(s: usize) TTL {
+        return @enumFromInt(s);
+    }
+
+    pub fn min(ttl: TTL, other: TTL) TTL {
+        return @enumFromInt(@min(@intFromEnum(ttl), @intFromEnum(other)));
+    }
+
+    pub fn write(ttl: TTL, w: *std.Io.Writer) !void {
+        return try w.writeInt(u32, @intFromEnum(ttl), .big);
+    }
+};
+
 pub const Payload = union(enum) {
     question: Question,
     answer: Resource,
@@ -35,7 +59,7 @@ pub const Resource = struct {
     name: []const u8,
     rtype: Type,
     class: Class,
-    ttl: u32,
+    ttl: TTL,
     data: RData,
 
     pub const RData = union(enum) {
@@ -54,7 +78,7 @@ pub const Resource = struct {
         _null: void,
     };
 
-    pub fn init(fqdn: []const u8, rdata: RData, ttl: u32) Resource {
+    pub fn init(fqdn: []const u8, rdata: RData, ttl: TTL) Resource {
         return .{
             .name = fqdn,
             .rtype = switch (rdata) {
@@ -83,7 +107,7 @@ pub const Resource = struct {
         idx += 2;
         try w.writeInt(u16, @intFromEnum(r.class), .big);
         idx += 2;
-        try w.writeInt(u32, r.ttl, .big);
+        try r.ttl.write(w);
         idx += 4;
         switch (r.data) {
             .a => |a| {
@@ -230,7 +254,7 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 .name = name,
                 .rtype = rtype,
                 .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
-                .ttl = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
+                .ttl = .seconds(@byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*)))),
                 .data = addr,
             };
 
@@ -298,13 +322,13 @@ pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
         if (answers[0].ips.len == 1) {
             for (answers, pointers) |ans, p| {
                 for (ans.ips) |ip| {
-                    const r: Resource = .init(ans.fqdn, ip, 300);
+                    const r: Resource = .init(ans.fqdn, ip, .@"5min");
                     idx += try r.write(&w, p);
                 }
             }
         } else {
             for (answers[0].ips) |ip| {
-                const r: Resource = .init(answers[0].fqdn, ip, 300);
+                const r: Resource = .init(answers[0].fqdn, ip, .@"5min");
                 idx += try r.write(&w, pointers[0]);
             }
         }
