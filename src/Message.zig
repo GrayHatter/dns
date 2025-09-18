@@ -292,6 +292,11 @@ pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Resource.RData, b
             const r: Resource = .init(fqdn, ip, 300);
             idx += try r.write(&w, p);
         }
+    } else if (fqdns.len == 1) {
+        for (ips) |ip| {
+            const r: Resource = .init(fqdns[0], ip, 300);
+            idx += try r.write(&w, pointers[0]);
+        }
     } else if (ips.len != 0) return error.InvalidAnswer;
 
     return .{

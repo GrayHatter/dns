@@ -19,6 +19,82 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
     std.posix.exit(1);
 }
 
+fn cachedAnswer(
+    qid: u16,
+    name: []const u8,
+    qdcount: u16,
+    qtype: DNS.Message.Type,
+    domain: *const Domain,
+    zone: *Zone,
+    downstream: network.Peer,
+    addr: std.net.Address,
+) !bool {
+    var res_buff: [20]RData = undefined;
+    const now: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
+    zone.hits += 1;
+    log.err("{} hits for domain {s}", .{ zone.hits, name });
+    var ans_bytes: [512]u8 = undefined;
+    switch (zone.behavior) {
+        .nxdomain => {
+            if (qdcount == 1) {
+                const ans: DNS.Message = try .answerDrop(qid, name, &ans_bytes);
+                try downstream.sendTo(addr, ans.bytes);
+                log.err("dropping request for {s}", .{name});
+                return true;
+            }
+            log.err("unable to drop complex record for {s}", .{name});
+            return false;
+        },
+        .cached => |c_result| {
+            if (c_result.ttl < now) {
+                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+                return false;
+            }
+            switch (qtype) {
+                .a => {
+                    if (c_result.a.items.len == 0) {
+                        log.err("a request is null {s}", .{domain.zone});
+                        return false;
+                    }
+                    const res_list: []RData = res_buff[0..c_result.a.items.len];
+                    for (c_result.a.items, res_list) |src, *dst| {
+                        dst.* = .{ .a = src };
+                    }
+                    const ans: DNS.Message = try .answer(qid, &[1][]const u8{name}, res_list, &ans_bytes);
+                    log.info("cached answer {any}", .{ans.bytes});
+                    //std.time.sleep(100_000);
+                    try downstream.sendTo(addr, ans.bytes);
+                    return true;
+                },
+
+                .aaaa => {
+                    log.info("cached {s}", .{domain.zone});
+                    if (c_result.aaaa.items.len == 0) {
+                        log.err("aaaa request is null {s}", .{domain.zone});
+                        return false;
+                    }
+                    const res_list: []RData = res_buff[0..c_result.aaaa.items.len];
+                    for (c_result.aaaa.items, res_list) |src, *dst| {
+                        dst.* = .{ .aaaa = src };
+                    }
+                    const ans: DNS.Message = try .answer(
+                        qid,
+                        &[1][]const u8{name},
+                        res_list,
+                        &ans_bytes,
+                    );
+                    try downstream.sendTo(addr, ans.bytes);
+                    return true;
+                },
+                else => return false,
+            }
+        },
+
+        else => log.err("zone {s}", .{domain.zone}),
+    }
+    return false;
+}
+
 fn core(
     a: Allocator,
     cache: *ZoneCache,
@@ -64,49 +140,17 @@ fn core(
 
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
             if (tld.zones.getKeyPtr(lzone)) |zone| {
-                zone.hits += 1;
-                log.err("{} hits for domain {s}", .{ zone.hits, q.name });
-                var ans_bytes: [512]u8 = undefined;
-                switch (zone.behavior) {
-                    .nxdomain => {
-                        if (msg.header.qdcount == 1) {
-                            const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
-                            try downstream.sendTo(addr, ans.bytes);
-                            log.err("dropping request for {s}", .{q.name});
-                            return true;
-                        }
-                        log.err("unable to drop complex record for {s}", .{q.name});
-                    },
-                    .cached => |c_result| {
-                        log.info("cached {s}", .{domain.zone});
-                        if (c_result.ttl < now) {
-                            log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
-                            break;
-                        }
-                        const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
-                            .a => .{ .a = c_result.a orelse {
-                                log.err("a request is null {s}", .{domain.zone});
-                                continue;
-                            } },
-                            .aaaa => .{ .aaaa = c_result.aaaa orelse {
-                                log.err("aaaa request is null {s}", .{domain.zone});
-                                continue;
-                            } },
-                            else => break,
-                        }};
-
-                        const ans: DNS.Message = try .answer(
-                            msg.header.id,
-                            &[1][]const u8{q.name},
-                            &rdata,
-                            &ans_bytes,
-                        );
-                        log.info("cached answer {any}", .{ans.bytes});
-                        //std.time.sleep(100_000);
-                        try downstream.sendTo(addr, ans.bytes);
-                        return true;
-                    },
-                    else => log.err("zone {s}", .{domain.zone}),
+                if (try cachedAnswer(
+                    msg.header.id,
+                    q.name,
+                    msg.header.qdcount,
+                    q.qtype,
+                    &domain,
+                    zone,
+                    downstream,
+                    addr,
+                )) {
+                    return true;
                 }
             } else {
                 log.err("cache missing going to upstream", .{});
@@ -188,27 +232,40 @@ fn core(
             log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = {}", .{r});
-            if (tld.zones.getKeyPtr(lzone)) |zone| {
+            if (tld.zones.getOrPut(a, lzone)) |gop| {
+                const zone = gop.key_ptr;
+                if (!gop.found_existing) {
+                    zone.behavior = .new;
+                }
                 switch (zone.behavior) {
                     .new => {
-                        zone.behavior = .{ .cached = .{
-                            .ttl = @intCast(now + min_ttl),
-                            .a = if (r.rtype == .a) r.data.a else null,
-                            .aaaa = if (r.rtype == .aaaa) r.data.aaaa else null,
-                        } };
-                        continue;
-                    },
-                    .cached => {
-                        zone.behavior.cached = .{
-                            .ttl = @intCast(now + min_ttl),
-                            .a = if (r.rtype == .a) r.data.a else zone.behavior.cached.a,
-                            .aaaa = if (r.rtype == .aaaa) r.data.aaaa else zone.behavior.cached.aaaa,
+                        zone.behavior = .{
+                            .cached = .{
+                                .ttl = @intCast(now + min_ttl),
+                                .a = .{},
+                                .aaaa = .{},
+                            },
                         };
                         continue;
                     },
+                    .cached => {
+                        if (zone.behavior.cached.ttl < now) {
+                            zone.behavior.cached.a.clearRetainingCapacity();
+                            zone.behavior.cached.aaaa.clearRetainingCapacity();
+                        }
+
+                        zone.behavior.cached.ttl = @intCast(now + min_ttl);
+                    },
                     .nxdomain => {},
                 }
-            }
+
+                switch (r.rtype) {
+                    .a => try zone.behavior.cached.a.append(a, r.data.a),
+                    .aaaa => try zone.behavior.cached.aaaa.append(a, r.data.aaaa),
+                    else => {},
+                }
+                continue;
+            } else |err| return err;
         },
     };
     return false;
@@ -386,8 +443,8 @@ pub const Behavior = union(enum) {
 
     pub const Result = struct {
         ttl: u32 = 0,
-        a: ?[4]u8 = null,
-        aaaa: ?[16]u8 = null,
+        a: ArrayList(IPv4) = .{},
+        aaaa: ArrayList(IPv6) = .{},
     };
 };
 
@@ -473,9 +530,12 @@ pub const Domain = struct {
     }
 };
 
+pub const IPv4 = [4]u8;
+pub const IPv6 = [16]u8;
+
 const NetAddress = union(enum) {
-    v4: [4]u8,
-    v6: [16]u8,
+    v4: IPv4,
+    v6: IPv6,
 };
 
 const DaemonPeer = struct {
@@ -621,6 +681,7 @@ test main {
 
 const DNS = @import("dns.zig");
 const network = @import("network.zig");
+const RData = DNS.Message.Resource.RData;
 
 const std = @import("std");
 const log = std.log;
