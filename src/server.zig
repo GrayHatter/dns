@@ -60,7 +60,9 @@ fn cachedAnswer(
                     for (c_result.a.items, res_list) |src, *dst| {
                         dst.* = .{ .a = src };
                     }
-                    const ans: DNS.Message = try .answer(qid, &[1][]const u8{name}, res_list, &ans_bytes);
+                    const ans: DNS.Message = try .answer(qid, &[1]DNS.Message.AnswerData{
+                        .{ .fqdn = name, .ips = res_list },
+                    }, &ans_bytes);
                     log.info("cached answer {any}", .{ans.bytes});
                     //std.time.sleep(100_000);
                     try downstream.sendTo(addr, ans.bytes);
@@ -77,12 +79,9 @@ fn cachedAnswer(
                     for (c_result.aaaa.items, res_list) |src, *dst| {
                         dst.* = .{ .aaaa = src };
                     }
-                    const ans: DNS.Message = try .answer(
-                        qid,
-                        &[1][]const u8{name},
-                        res_list,
-                        &ans_bytes,
-                    );
+                    const ans: DNS.Message = try .answer(qid, &[1]DNS.Message.AnswerData{
+                        .{ .fqdn = name, .ips = res_list },
+                    }, &ans_bytes);
                     try downstream.sendTo(addr, ans.bytes);
                     return true;
                 },
@@ -240,20 +239,14 @@ fn core(
                 switch (zone.behavior) {
                     .new => {
                         zone.behavior = .{
-                            .cached = .{
-                                .ttl = @intCast(now + min_ttl),
-                                .a = .{},
-                                .aaaa = .{},
-                            },
+                            .cached = .{ .ttl = @intCast(now + min_ttl), .a = .{}, .aaaa = .{} },
                         };
-                        continue;
                     },
                     .cached => {
                         if (zone.behavior.cached.ttl < now) {
                             zone.behavior.cached.a.clearRetainingCapacity();
                             zone.behavior.cached.aaaa.clearRetainingCapacity();
                         }
-
                         zone.behavior.cached.ttl = @intCast(now + min_ttl);
                     },
                     .nxdomain => {},

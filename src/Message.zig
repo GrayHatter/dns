@@ -268,36 +268,47 @@ pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
     return msg;
 }
 
-pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Resource.RData, bytes: []u8) !Message {
+pub const AnswerData = struct {
+    fqdn: []const u8,
+    ips: []const Resource.RData,
+};
+
+pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
     var h: Header = .answer;
     h.id = id;
-    h.rcode = if (ips.len == 0) .name else .success;
-    h.qdcount = @intCast(fqdns.len);
-    h.ancount = @intCast(ips.len);
+    h.rcode = if (answers.len == 1 and answers[0].ips.len == 0) .name else .success;
+    h.qdcount = @intCast(answers.len);
+    for (answers) |ans| {
+        h.ancount += @intCast(ans.ips.len);
+    }
 
     var w: Writer = .fixed(bytes);
     var idx = try h.write(&w);
 
     var pbufs: [8]u14 = @splat(0);
-    var pointers: []u14 = pbufs[0..fqdns.len];
+    var pointers: []u14 = pbufs[0..answers.len];
 
-    for (fqdns, 0..) |fqdn, i| {
-        const q: Question = .init(fqdn);
+    for (answers, 0..) |ans, i| {
+        const q: Question = .init(ans.fqdn);
         pointers[i] = @intCast(idx);
         idx += try q.write(&w);
     }
 
-    if (fqdns.len == ips.len) {
-        for (fqdns, ips, pointers) |fqdn, ip, p| {
-            const r: Resource = .init(fqdn, ip, 300);
-            idx += try r.write(&w, p);
+    if (answers.len == 1) {
+        if (answers[0].ips.len == 1) {
+            for (answers, pointers) |ans, p| {
+                for (ans.ips) |ip| {
+                    const r: Resource = .init(ans.fqdn, ip, 300);
+                    idx += try r.write(&w, p);
+                }
+            }
+        } else {
+            for (answers[0].ips) |ip| {
+                const r: Resource = .init(answers[0].fqdn, ip, 300);
+                idx += try r.write(&w, pointers[0]);
+            }
         }
-    } else if (fqdns.len == 1) {
-        for (ips) |ip| {
-            const r: Resource = .init(fqdns[0], ip, 300);
-            idx += try r.write(&w, pointers[0]);
-        }
-    } else if (ips.len != 0) return error.InvalidAnswer;
+    } else return error.NotImplemented;
 
     return .{
         .header = h,
@@ -306,7 +317,7 @@ pub fn answer(id: u16, fqdns: []const []const u8, ips: []const Resource.RData, b
 }
 
 pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
-    return try answer(id, &[1][]const u8{fqdn}, &[0]Resource.RData{}, bytes);
+    return try answer(id, &[1]AnswerData{.{ .fqdn = fqdn, .ips = &[0]Resource.RData{} }}, bytes);
 }
 
 pub fn write(m: Message, w: *Writer) !usize {

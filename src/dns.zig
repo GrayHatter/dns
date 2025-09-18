@@ -146,8 +146,9 @@ test "build answer" {
 
     const msg0 = try Message.answer(
         31337,
-        &[1][]const u8{"gr.ht."},
-        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.AnswerData{
+            .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
+        },
         &buffer,
     );
 
@@ -162,8 +163,9 @@ test "build answer" {
 
     const msg1 = try Message.answer(
         31337,
-        &[1][]const u8{"gr.ht"},
-        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.AnswerData{
+            .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
+        },
         &buffer,
     );
 
@@ -180,8 +182,9 @@ test "build answer" {
 
     const msg2 = try Message.answer(
         31337,
-        &[1][]const u8{"gr.ht."},
-        &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }},
+        &[1]Message.AnswerData{
+            .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
+        },
         &big_buffer,
     );
     try std.testing.expectEqualSlices(u8, &[_]u8{
