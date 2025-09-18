@@ -63,56 +63,54 @@ fn core(
             };
 
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
-            if (tld.zones.getOrPut(a, lzone)) |zone| {
-                zone.key_ptr.hits += 1;
-                if (zone.found_existing) {
-                    log.err("{} hits for domain {s}", .{ zone.key_ptr.hits, q.name });
-                    var ans_bytes: [512]u8 = undefined;
-                    switch (zone.key_ptr.behavior) {
-                        .nxdomain => {
-                            if (msg.header.qdcount == 1) {
-                                const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
-                                try downstream.sendTo(addr, ans.bytes);
-                                log.err("dropping request for {s}", .{q.name});
-                                return true;
-                            }
-                            log.err("unable to drop complex record for {s}", .{q.name});
-                        },
-                        .cached => |c_result| {
-                            log.info("cached {s}", .{domain.zone});
-                            if (c_result.ttl < now) {
-                                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
-                                break;
-                            }
-                            const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
-                                .a => .{ .a = c_result.a orelse {
-                                    log.err("a request is null {s}", .{domain.zone});
-                                    continue;
-                                } },
-                                .aaaa => .{ .aaaa = c_result.aaaa orelse {
-                                    log.err("aaaa request is null {s}", .{domain.zone});
-                                    continue;
-                                } },
-                                else => break,
-                            }};
-
-                            const ans: DNS.Message = try .answer(
-                                msg.header.id,
-                                &[1][]const u8{q.name},
-                                &rdata,
-                                &ans_bytes,
-                            );
-                            log.info("cached answer {any}", .{ans.bytes});
-                            //std.time.sleep(100_000);
+            if (tld.zones.getKeyPtr(lzone)) |zone| {
+                zone.hits += 1;
+                log.err("{} hits for domain {s}", .{ zone.hits, q.name });
+                var ans_bytes: [512]u8 = undefined;
+                switch (zone.behavior) {
+                    .nxdomain => {
+                        if (msg.header.qdcount == 1) {
+                            const ans: DNS.Message = try .answerDrop(msg.header.id, q.name, &ans_bytes);
                             try downstream.sendTo(addr, ans.bytes);
+                            log.err("dropping request for {s}", .{q.name});
                             return true;
-                        },
-                        else => log.err("zone {s}", .{domain.zone}),
-                    }
-                } else {
-                    log.err("cache missing going to upstream", .{});
+                        }
+                        log.err("unable to drop complex record for {s}", .{q.name});
+                    },
+                    .cached => |c_result| {
+                        log.info("cached {s}", .{domain.zone});
+                        if (c_result.ttl < now) {
+                            log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - c_result.ttl, c_result.ttl });
+                            break;
+                        }
+                        const rdata = [1]DNS.Message.Resource.RData{switch (q.qtype) {
+                            .a => .{ .a = c_result.a orelse {
+                                log.err("a request is null {s}", .{domain.zone});
+                                continue;
+                            } },
+                            .aaaa => .{ .aaaa = c_result.aaaa orelse {
+                                log.err("aaaa request is null {s}", .{domain.zone});
+                                continue;
+                            } },
+                            else => break,
+                        }};
+
+                        const ans: DNS.Message = try .answer(
+                            msg.header.id,
+                            &[1][]const u8{q.name},
+                            &rdata,
+                            &ans_bytes,
+                        );
+                        log.info("cached answer {any}", .{ans.bytes});
+                        //std.time.sleep(100_000);
+                        try downstream.sendTo(addr, ans.bytes);
+                        return true;
+                    },
+                    else => log.err("zone {s}", .{domain.zone}),
                 }
-            } else |e| return e;
+            } else {
+                log.err("cache missing going to upstream", .{});
+            }
         },
         .answer => break,
     };
