@@ -7,6 +7,7 @@ pub const Header = @import("Header.zig").Header;
 
 pub const TTL = enum(u32) {
     zero = 0,
+    @"1min" = 60,
     @"5min" = 300,
     @"10min" = 600,
     _,
@@ -16,8 +17,20 @@ pub const TTL = enum(u32) {
         return ttl_s < now;
     }
 
+    pub fn timestamp(ttl: TTL, now: i64) i64 {
+        return now +| @intFromEnum(ttl);
+    }
+
     pub fn seconds(s: usize) TTL {
         return @enumFromInt(s);
+    }
+
+    pub fn minutes(m: usize) TTL {
+        return seconds(m *| 60);
+    }
+
+    pub fn plus(ttl: TTL, other: TTL) TTL {
+        return @enumFromInt(@intFromEnum(ttl) + @intFromEnum(other));
     }
 
     pub fn min(ttl: TTL, other: TTL) TTL {
@@ -28,6 +41,15 @@ pub const TTL = enum(u32) {
         return try w.writeInt(u32, @intFromEnum(ttl), .big);
     }
 };
+
+test TTL {
+    try std.testing.expectEqual(TTL.@"1min", TTL.seconds(60));
+    try std.testing.expectEqual(TTL.@"5min", TTL.minutes(5));
+    try std.testing.expectEqual(TTL.@"10min", TTL.minutes(10));
+
+    const pls: TTL = .plus(.@"5min", .@"5min");
+    try std.testing.expectEqual(pls, TTL.@"10min");
+}
 
 pub const Payload = union(enum) {
     question: Question,

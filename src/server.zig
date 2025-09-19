@@ -30,7 +30,7 @@ fn cachedAnswer(
     addr: std.net.Address,
 ) !bool {
     var res_buff: [20]RData = undefined;
-    const now: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
+    const now: Timestamp = .init(std.time.timestamp());
     zone.hits += 1;
     log.err("{} hits for domain {s}", .{ zone.hits, name });
     var ans_bytes: [512]u8 = undefined;
@@ -46,8 +46,11 @@ fn cachedAnswer(
             return false;
         },
         .cached => |c_result| {
-            if (c_result.ttl.expired(now)) {
-                log.err("cached {s} ttl expired {} ({})", .{ domain.zone, now - @intFromEnum(c_result.ttl), c_result.ttl });
+            if (c_result.expires.expired(now)) {
+                log.err(
+                    "cached {s} ttl expired {} ({})",
+                    .{ domain.zone, @intFromEnum(now) - @intFromEnum(c_result.expires), c_result.expires },
+                );
                 return false;
             }
             switch (qtype) {
@@ -102,7 +105,7 @@ fn core(
     addr: std.net.Address,
     upstream: network.Peer,
 ) !bool {
-    const now: u32 = @intCast(@as(i32, @truncate(std.time.timestamp())));
+    const now: Timestamp = .init(std.time.timestamp());
     const msg = try DNS.Message.fromBytes(in_msg);
 
     if (msg.header.qdcount >= 16) {
@@ -196,7 +199,7 @@ fn core(
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
-    var ttl: DNS.Message.TTL = .zero;
+    var suggested: DNS.Message.TTL = .@"5min";
 
     var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
@@ -222,14 +225,14 @@ fn core(
                 }
             };
             lzone = .{ .name = try cache.store(domain.zone) };
-            //log.err("r question = {s}", .{q.name});
-            //log.debug("r question = {}", .{q});
+            log.err("r question = {s}", .{q.name});
+            log.err("r question = {}", .{q});
         },
         .answer => |r| {
-            ttl = ttl.min(r.ttl);
+            suggested = suggested.min(r.ttl);
             log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
-            log.debug("r               {}", .{r.data});
-            log.debug("r question = {}", .{r});
+            log.err("r               {}", .{r.data});
+            log.err("r question = {}", .{r});
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) {
@@ -238,15 +241,15 @@ fn core(
                 switch (zone.behavior) {
                     .new => {
                         zone.behavior = .{
-                            .cached = .{ .ttl = @enumFromInt(now + @intFromEnum(ttl)), .a = .{}, .aaaa = .{} },
+                            .cached = .{ .expires = now, .a = .{}, .aaaa = .{} },
                         };
                     },
                     .cached => {
-                        if (zone.behavior.cached.ttl.expired(now)) {
+                        if (zone.behavior.cached.expires.expired(now)) {
                             zone.behavior.cached.a.clearRetainingCapacity();
                             zone.behavior.cached.aaaa.clearRetainingCapacity();
                         }
-                        zone.behavior.cached.ttl = @enumFromInt(now + @intFromEnum(ttl));
+                        zone.behavior.cached.expires = now.ttl(suggested);
                     },
                     .nxdomain => {},
                 }
@@ -428,13 +431,32 @@ fn munmap(ptr: []const u8) !void {
     std.os.linux.munmap(ptr.ptr, ptr.len);
 }
 
+pub const Timestamp = enum(i64) {
+    zero = 0,
+    _,
+
+    pub fn init(now: i64) Timestamp {
+        return @enumFromInt(now);
+    }
+
+    pub fn expired(ts: Timestamp, now: Timestamp) bool {
+        const ts_s: i64 = @intFromEnum(ts);
+        const now_s: i64 = @intFromEnum(now);
+        return ts_s < now_s;
+    }
+
+    pub fn ttl(ts: Timestamp, ttl_: DNS.Message.TTL) Timestamp {
+        return @enumFromInt(@intFromEnum(ts) +| @intFromEnum(ttl_));
+    }
+};
+
 pub const Behavior = union(enum) {
     new: void,
     nxdomain: u32,
     cached: Behavior.Result,
 
     pub const Result = struct {
-        ttl: DNS.Message.TTL = .zero,
+        expires: Timestamp = .zero,
         a: ArrayList(IPv4) = .{},
         aaaa: ArrayList(IPv6) = .{},
     };
