@@ -1,7 +1,7 @@
-const Message = @This();
-
 header: Header,
 bytes: []const u8,
+
+const Message = @This();
 
 pub const Header = @import("Header.zig").Header;
 
@@ -203,7 +203,7 @@ pub fn fromBytes(bytes: []const u8) !Message {
 pub const Iterator = struct {
     msg: *const Message,
     index: usize = 0,
-    name_buffer: [255]u8 = undefined,
+    name_buffer: [1024]u8 = undefined,
 
     pub fn init(msg: *const Message) Iterator {
         return .{
@@ -224,6 +224,10 @@ pub const Iterator = struct {
 
 pub fn iterator(msg: *const Message) Iterator {
     return Iterator.init(msg);
+}
+
+fn byteSwap(T: type, bytes: [@sizeOf(T)]u8) T {
+    return @byteSwap(@as(u16, @bitCast(bytes)));
 }
 
 pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
@@ -251,18 +255,23 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 continue;
             }
             const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
-            const addr: Resource.RData = switch (rtype) {
-                .a => .{ .a = msg.bytes[idx..][10..][0..4].* },
-                .aaaa => .{ .aaaa = msg.bytes[idx..][10..][0..16].* },
-                .cname => .{ .cname = msg.bytes[idx..][10..][0..rdlen] },
+
+            const class: Class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*))));
+            const ttl: TTL = .seconds(@byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))));
+
+            idx += 10;
+            const rdata: Resource.RData = switch (rtype) {
+                .a => .{ .a = msg.bytes[idx..][0..4].* },
+                .aaaa => .{ .aaaa = msg.bytes[idx..][0..16].* },
+                .cname => .{ .cname = msg.bytes[idx..][0..rdlen] },
                 .soa => .{ .soa = .{
-                    .mname = name,
-                    .rname = "",
+                    .mname = try Label.getName(name_buf[128..], msg.bytes, &idx),
+                    .rname = try Label.getName(name_buf[256..], msg.bytes, &idx),
                     .serial = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
-                    .refresh = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
-                    .retry = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
-                    .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
-                    .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
+                    .refresh = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
+                    .retry = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][8..12].*))),
+                    .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][12..16].*))),
+                    .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][16..20].*))),
                 } },
                 .EDNS => .{ ._null = {} },
                 .https => .{ ._null = {} },
@@ -275,9 +284,9 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
             const r: Resource = .{
                 .name = name,
                 .rtype = rtype,
-                .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
-                .ttl = .seconds(@byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*)))),
-                .data = addr,
+                .class = class,
+                .ttl = ttl,
+                .data = rdata,
             };
 
             return .{ .answer = r };
@@ -289,7 +298,7 @@ pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
     var msg: Message = .{
         .header = .{
             .id = @as(u16, 31337),
-            .qr = false,
+            .qr = .query,
             .opcode = 0,
             .aa = false,
             .tc = false,

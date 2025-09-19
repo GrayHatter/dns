@@ -86,6 +86,7 @@ fn cachedAnswer(
                         .{ .fqdn = name, .ips = res_list },
                     }, &ans_bytes);
                     try downstream.sendTo(addr, ans.bytes);
+                    std.debug.print("{f}\n", .{ans.header});
                     return true;
                 },
                 else => return false,
@@ -107,6 +108,8 @@ fn core(
 ) !bool {
     const now: Timestamp = .init(std.time.timestamp());
     const msg = try DNS.Message.fromBytes(in_msg);
+
+    log.err("incoming packet\n{f}", .{msg.header});
 
     if (msg.header.qdcount >= 16) {
         log.err("dropping invalid msg", .{});
@@ -192,10 +195,14 @@ fn core(
         }
     }
 
+    //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
+
     try downstream.sendTo(addr, relay_buf[0..b_cnt]);
 
     const rmsg: DNS.Message = try .fromBytes(relayed);
     if (rmsg.header.qdcount != 1) return false;
+
+    log.err("answer from upstream:\n{f}", .{rmsg.header});
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
@@ -232,7 +239,7 @@ fn core(
             suggested = suggested.min(r.ttl);
             log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.err("r               {}", .{r.data});
-            log.err("r question = {}", .{r});
+            log.debug("r question = {}", .{r});
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) {
@@ -257,6 +264,10 @@ fn core(
                 switch (r.rtype) {
                     .a => try zone.behavior.cached.a.append(a, r.data.a),
                     .aaaa => try zone.behavior.cached.aaaa.append(a, r.data.aaaa),
+                    .soa => {
+                        log.err("r               {s}", .{r.data.soa.mname});
+                        log.err("r               {s}", .{r.data.soa.rname});
+                    },
                     else => {},
                 }
                 continue;

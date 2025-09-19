@@ -10,8 +10,13 @@ pub const Header = packed struct(u96) {
     tc: bool,
     aa: bool,
     opcode: u4,
-    qr: bool,
+    qr: Query,
     id: u16,
+
+    pub const Query = enum(u1) {
+        query = 0,
+        answer = 1,
+    };
 
     pub const RCode = enum(u4) {
         success = 0,
@@ -30,7 +35,7 @@ pub const Header = packed struct(u96) {
 
         return .{
             .id = id,
-            .qr = 0x80 & hbits != 0,
+            .qr = if (0x80 & hbits == 0) .query else .answer,
             .opcode = @truncate((0x70 & hbits) >> 3),
             .aa = 0x4 & hbits != 0,
             .tc = 0x2 & hbits != 0,
@@ -51,11 +56,55 @@ pub const Header = packed struct(u96) {
         return 12;
     }
 
+    pub fn format(h: Header, w: *Writer) !void {
+        const block =
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|ID                    {d: ^7}                  |
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{s}|  {d: ^7} |{s}|{s}|{s}|{s}|{d: ^9}|{s: ^11}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|QDCOUNT               {d: ^7}                  |
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|ANCOUNT               {d: ^7}                  |
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|NSCOUNT               {d: ^7}                  |
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|ARCOUNT               {d: ^7}                  |
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\
+        ;
+        try w.print(block, .{
+            h.id,
+            if (h.qr == .query) "Qr" else "An",
+            h.opcode,
+
+            if (h.aa) "AA" else "  ",
+            if (h.tc) "TC" else "  ",
+            if (h.rd) "RD" else "  ",
+            if (h.ra) "RA" else "  ",
+
+            h.z,
+            switch (h.rcode) {
+                .success => "success",
+                .format => "fmt error",
+                .server => "srv error",
+                .name => "nxdomain",
+                .not_implemented => "srv unknown",
+                .refused => "refused",
+                else => "invalid",
+            },
+            h.qdcount,
+            h.ancount,
+            h.nscount,
+            h.arcount,
+        });
+    }
+
     pub const answer: Header = .{
         .id = 0,
-        .qr = true,
+        .qr = .answer,
         .opcode = 0,
-        .aa = true,
+        .aa = false,
         .tc = false,
         .rd = true,
         .ra = true,
@@ -66,6 +115,11 @@ pub const Header = packed struct(u96) {
         .arcount = 0,
     };
 };
+
+test "format" {
+    const h: Header = .answer;
+    if (false) std.debug.print("{f}\n", .{h});
+}
 
 const std = @import("std");
 const Writer = std.Io.Writer;

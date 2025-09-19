@@ -92,7 +92,7 @@ pub const Message = @import("Message.zig");
 test "Message.Header" {
     const thing: Message.Header = .{
         .id = 16,
-        .qr = false,
+        .qr = .query,
         .opcode = 0,
         .aa = true,
         .tc = false,
@@ -153,7 +153,7 @@ test "build answer" {
     );
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        122, 105, 129, 128, 0,   1,   0, 1, 0,  0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
         12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
         4,   20,  69,
@@ -170,7 +170,7 @@ test "build answer" {
     );
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        122, 105, 129, 128, 0,   1,   0, 1, 0,  0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
         12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
         4,   20,  69,
@@ -188,7 +188,7 @@ test "build answer" {
         &big_buffer,
     );
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        122, 105, 133, 128, 0,   1,   0, 1, 0,  0, 0, 0,
+        122, 105, 129, 128, 0,   1,   0, 1, 0,  0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0, 1,  0, 1, 192,
         12,  0,   1,   0,   1,   0,   0, 1, 44, 0, 4, 127,
         4,   20,  69,
@@ -333,7 +333,7 @@ test "build answerDrop" {
     const msg0 = try Message.answerDrop(31337, "gr.ht.", &buffer);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
-        122, 105, 133, 131, 0,   1,   0, 0, 0, 0, 0, 0,
+        122, 105, 129, 131, 0,   1,   0, 0, 0, 0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0, 1, 0, 1,
     }, &buffer);
     try std.testing.expectEqual(msg0.header.qdcount, 1);
