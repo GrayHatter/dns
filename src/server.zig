@@ -470,6 +470,7 @@ pub const Behavior = union(enum) {
         expires: Timestamp = .zero,
         a: ArrayList(IPv4) = .{},
         aaaa: ArrayList(IPv6) = .{},
+        cname: ArrayList(u8) = .{},
     };
 };
 
