@@ -1,3 +1,16 @@
+var blocked_ips: []const [4]u8 = &[0][4]u8{};
+
+const upstreams: [4]DaemonPeer = .{
+    .cloudflare_0,
+    .cloudflare_1,
+    .google_0,
+    .google_1,
+};
+
+pub const std_options: std.Options = .{
+    .log_level = .warn,
+};
+
 fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
     if (err) |e| {
         std.debug.print("Error: {s}\n\n", .{e});
@@ -295,8 +308,6 @@ fn managedCore(
     };
 }
 
-var blocked_ips: []const [4]u8 = &[0][4]u8{};
-
 pub fn main() !void {
     const a = std.heap.smp_allocator;
 
@@ -571,17 +582,6 @@ const DaemonPeer = struct {
     pub const cloudflare_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 1, 0, 0, 1 } } };
     pub const google_0: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 8, 8 } } };
     pub const google_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 4, 4 } } };
-};
-
-const upstreams: [4]DaemonPeer = .{
-    .cloudflare_0,
-    .cloudflare_1,
-    .google_0,
-    .google_1,
-};
-
-pub const std_options: std.Options = .{
-    .log_level = .warn,
 };
 
 const RecordAddress = union(enum) {
