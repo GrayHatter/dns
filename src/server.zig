@@ -9,7 +9,24 @@ const upstreams: [4]DaemonPeer = .{
 
 pub const std_options: std.Options = .{
     .log_level = .warn,
+    .logFn = logFunc,
 };
+
+var log_target_level: log.Level = .warn;
+
+pub fn logFunc(
+    comptime message_level: log.Level,
+    comptime _: @Type(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    if (@intFromEnum(message_level) > @intFromEnum(log_target_level)) return;
+
+    var buffer: [64]u8 = undefined;
+    const stderr = std.debug.lockStderrWriter(&buffer);
+    defer std.debug.unlockStderrWriter();
+    nosuspend stderr.print(format ++ "\n", args) catch return;
+}
 
 fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
     if (err) |e| {
