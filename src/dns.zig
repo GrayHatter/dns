@@ -22,7 +22,7 @@ pub const Label = struct {
     }
 
     pub fn getName(buffer: []u8, bytes: []const u8, index: *usize) ![]u8 {
-        var name: std.ArrayListUnmanaged(u8) = .{
+        var name: ArrayList(u8) = .{
             .items = buffer,
             .capacity = buffer.len,
         };
@@ -57,8 +57,13 @@ pub const Label = struct {
     }
 
     pub fn writeName(name: []const u8, w: *Writer) !usize {
-        var itr = std.mem.splitScalar(u8, name, '.');
+        //std.debug.assert(name.len > 0);
+        if (name.len == 0) {
+            try w.writeByte(0);
+            return 1;
+        }
         var len: usize = 0;
+        var itr = std.mem.splitScalar(u8, name, '.');
         while (itr.next()) |n| {
             std.debug.assert(n.len <= 63);
             try w.writeByte(@intCast(n.len));
@@ -368,5 +373,6 @@ test "grht vectors" {
 const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
+const ArrayList = std.ArrayList;
 const indexOfScalar = std.mem.indexOfScalar;
 const Writer = std.Io.Writer;

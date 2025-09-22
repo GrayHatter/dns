@@ -1,5 +1,7 @@
 header: Header,
 bytes: []const u8,
+questions: ?ArrayList(Question) = null,
+answers: ?ArrayList(Resource) = null,
 
 const Message = @This();
 
@@ -74,6 +76,18 @@ pub const Question = struct {
         try w.writeInt(u16, @intFromEnum(q.qtype), .big);
         try w.writeInt(u16, @intFromEnum(q.class), .big);
         return len + 4;
+    }
+
+    pub fn format(q: Question, w: *Writer) !void {
+        const block =
+            \\/ Name: {s: ^40}/
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{s: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{s: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+        ;
+        try w.print(block, .{ q.name, @tagName(q.qtype), @tagName(q.class) });
     }
 };
 
@@ -150,6 +164,33 @@ pub const Resource = struct {
 
         return idx;
     }
+
+    pub fn format(r: Resource, w: *Writer) !void {
+        const block =
+            \\/ Name:                                         /
+            \\/{s: ^47}/
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{s: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{s: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{d: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+            \\|{d: ^47}|
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--|
+            \\/                     RDATA                     /
+            \\/                                               /
+            \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
+        ;
+
+        try w.print(block, .{
+            r.name, @tagName(r.rtype), @tagName(r.class), r.ttl, switch (r.data) {
+                .a => 4,
+                .aaaa => 16,
+                .cname, .soa, ._null => @as(usize, 0),
+            },
+        });
+    }
 };
 
 pub const Type = enum(u16) {
@@ -224,6 +265,24 @@ pub const Iterator = struct {
 
 pub fn iterator(msg: *const Message) Iterator {
     return Iterator.init(msg);
+}
+
+pub fn parse(msg: *Message, a: Allocator) !void {
+    var itr = iterator(msg);
+    msg.questions = .{};
+    msg.answers = .{};
+    while (try itr.next()) |pyld| switch (pyld) {
+        .question => |q| {
+            try msg.questions.?.append(a, q);
+            const name = try a.dupe(u8, msg.questions.?.items[msg.questions.?.items.len - 1].name);
+            msg.questions.?.items[msg.questions.?.items.len - 1].name = name;
+        },
+        .answer => |ans| {
+            try msg.answers.?.append(a, ans);
+            const name = try a.dupe(u8, msg.answers.?.items[msg.answers.?.items.len - 1].name);
+            msg.answers.?.items[msg.answers.?.items.len - 1].name = name;
+        },
+    };
 }
 
 fn byteSwap(T: type, bytes: [@sizeOf(T)]u8) T {
@@ -376,9 +435,34 @@ pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
 }
 
 pub fn write(m: Message, w: *Writer) !usize {
-    const hlen = try m.header.write(w);
-    std.debug.assert(hlen == 12);
-    return hlen;
+    var idx = try m.header.write(w);
+    std.debug.assert(idx == 12);
+
+    var pbufs: [32]u14 = @splat(0);
+    var ptr_idx: [*]u14 = (&pbufs).ptr;
+
+    if (m.questions) |questions| {
+        for (questions.items) |question| {
+            ptr_idx[0] = @intCast(idx);
+            idx += try question.write(w);
+            ptr_idx += 1;
+        }
+    }
+
+    if (m.answers) |answers| {
+        for (answers.items) |ans| {
+            for (m.questions.?.items, 0..) |qn, i| {
+                if (std.mem.eql(u8, ans.name, qn.name)) {
+                    idx += try ans.write(w, pbufs[i]);
+                    break;
+                }
+            } else {
+                idx += try ans.write(w, null);
+            }
+        }
+    }
+
+    return idx;
 }
 
 test query {
@@ -392,6 +476,81 @@ test query {
 
 const Label = @import("dns.zig").Label;
 
+test Message {
+    const source_bytes = [_]u8{
+        197, 22,  129, 128, 0,   1,   0,   1,   0,   0,   0,   0,
+        7,   122, 105, 103, 108, 97,  110, 103, 3,   111, 114, 103,
+        0,   0,   28,  0,   1,   192, 12,  0,   28,  0,   1,   0,
+        0,   1,   44,  0,   16,  42,  1,   4,   249, 48,  81,  75,
+        210, 0,   0,   0,   0,   0,   0,   0,   2,
+    };
+
+    var msg1 = try Message.fromBytes(&source_bytes);
+    var w_b: [source_bytes.len]u8 = undefined;
+    try msg1.parse(std.testing.allocator);
+    defer msg1.questions.?.deinit(std.testing.allocator);
+    defer msg1.answers.?.deinit(std.testing.allocator);
+    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+
+    var fixed: Writer = .fixed(&w_b);
+    _ = try msg1.write(&fixed);
+
+    try std.testing.expectEqualSlices(u8, &source_bytes, &w_b);
+    //const source_bytes_soa = [_]u8{
+    //    122, 105, 129, 131, 0,   1,   0,   0,   0,   1,   0,   0,   2,   64,
+    //    49,  1,   49,  1,   49,  1,   49,  0,   0,   1,   0,   1,   0,   0,
+    //    6,   0,   1,   0,   1,   81,  128, 0,   64,  1,   97,  12,  114, 111,
+    //    111, 116, 45,  115, 101, 114, 118, 101, 114, 115, 3,   110, 101, 116,
+    //    0,   5,   110, 115, 116, 108, 100, 12,  118, 101, 114, 105, 115, 105,
+    //    103, 110, 45,  103, 114, 115, 3,   99,  111, 109, 0,   120, 179, 132,
+    //    44,  0,   0,   7,   8,   0,   0,   3,   132, 0,   9,   58,  128, 0,
+    //    1,   81,  128,
+    //};
+}
+
+test "Message.1" {
+    // TODO fix packing
+    if (true) return error.SkipZigTest;
+
+    const source_bytes = [_]u8{
+        242, 38,  129, 128, 0,   1,   0,   4,   0,   1,   0,   0,   3,
+        110, 110, 110, 9,   110, 100, 110, 110, 101, 110, 101, 110, 110,
+        3,   99,  110, 109, 0,   0,   28,  0,   1,   192, 12,  0,   5,
+        0,   1,   0,   0,   11,  214, 0,   25,  17,  110, 110, 110, 45,
+        110, 105, 110, 110, 101, 110, 101, 110, 110, 45,  99,  110, 109,
+        4,   103, 110, 108, 98,  192, 16,  192, 47,  0,   5,   0,   1,
+        0,   0,   11,  214, 0,   32,  14,  50,  45,  48,  49,  45,  51,
+        55,  45,  50,  45,  45,  45,  49,  56,  3,   99,  100, 120, 7,
+        99,  45,  45,  45,  45,  105, 110, 3,   110, 101, 110, 0,   192,
+        84,  0,   5,   0,   1,   0,   0,   0,   32,  0,   28,  3,   110,
+        110, 110, 9,   110, 105, 110, 110, 101, 110, 100, 110, 110, 3,
+        99,  110, 100, 7,   100, 100, 100, 100, 100, 100, 120, 192, 111,
+        192, 128, 0,   5,   0,   1,   0,   0,   83,  84,  0,   21,  5,
+        101, 54,  52,  52,  57,  1,   97,  10,  97,  107, 97,  109, 97,
+        105, 101, 100, 103, 101, 192, 111, 192, 174, 0,   6,   0,   1,
+        0,   0,   2,   220, 0,   46,  3,   110, 48,  97,  192, 176, 10,
+        104, 110, 110, 110, 109, 97,  110, 110, 101, 110, 6,   97,  107,
+        97,  109, 97,  105, 192, 26,  103, 212, 110, 234, 0,   0,   3,
+        232, 0,   0,   3,   232, 0,   0,   3,   232, 0,   0,   7,   8,
+    };
+
+    var msg1 = try Message.fromBytes(&source_bytes);
+    var w_b: [source_bytes.len]u8 = undefined;
+    try msg1.parse(std.testing.allocator);
+    defer msg1.questions.?.deinit(std.testing.allocator);
+    defer msg1.answers.?.deinit(std.testing.allocator);
+    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+
+    var fixed: Writer = .fixed(&w_b);
+    _ = try msg1.write(&fixed);
+
+    try std.testing.expectEqualSlices(u8, &source_bytes, &w_b);
+}
+
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const log = std.log;
 const Writer = std.Io.Writer;
+const ArrayList = std.ArrayList;

@@ -262,14 +262,16 @@ fn core(
                 }
             };
             lzone = .{ .name = try cache.store(domain.zone) };
-            log.err("r question = {s}", .{q.name});
-            log.err("r question = {}", .{q});
+            log.debug("r question = {s}", .{q.name});
+            log.debug("r question = \n{f}", .{q});
+            log.err("{f}", .{q});
         },
         .answer => |r| {
             suggested = suggested.min(r.ttl);
-            log.err("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
-            log.err("r               {}", .{r.data});
-            log.debug("r question = {}", .{r});
+            log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
+            log.debug("r               {}", .{r.data});
+            log.debug("r question = \n{f}", .{r});
+            log.err("{f}", .{r});
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) {
