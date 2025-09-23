@@ -183,8 +183,14 @@ pub const Resource = struct {
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
         ;
 
+        const rtype = @tagName(r.rtype);
+        const class = switch (r.class) {
+            inline else => @tagName(r.class),
+            _ => "other",
+        };
+
         try w.print(block, .{
-            r.name, @tagName(r.rtype), @tagName(r.class), r.ttl, switch (r.data) {
+            r.name, rtype, class, r.ttl, switch (r.data) {
                 .a => 4,
                 .aaaa => 16,
                 .cname, .soa, ._null => @as(usize, 0),
