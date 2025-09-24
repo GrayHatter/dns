@@ -80,14 +80,18 @@ pub const Question = struct {
 
     pub fn format(q: Question, w: *Writer) !void {
         const block =
-            \\/ Name: {s: ^40}/
+            \\/ NAME: {s: ^40}/
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{s: ^47}|
+            \\| TYPE: {s: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{s: ^47}|
+            \\| CLASS:{s: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
         ;
-        try w.print(block, .{ q.name, @tagName(q.qtype), @tagName(q.class) });
+        try w.print(block, .{
+            q.name,
+            @tagName(q.qtype),
+            @tagName(q.class),
+        });
     }
 };
 
@@ -167,16 +171,15 @@ pub const Resource = struct {
 
     pub fn format(r: Resource, w: *Writer) !void {
         const block =
-            \\/ Name:                                         /
-            \\/{s: ^47}/
+            \\/ NAME: {s: ^40}/
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{s: ^47}|
+            \\| TYPE: {s: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{s: ^47}|
+            \\| CLASS:{s: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{d: ^47}|
+            \\| TTL:  {d: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
-            \\|{d: ^47}|
+            \\| SIZE: {d: ^40}|
             \\+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--|
             \\/                     RDATA                     /
             \\/                                               /
@@ -190,7 +193,8 @@ pub const Resource = struct {
         };
 
         try w.print(block, .{
-            r.name, rtype, class, r.ttl, switch (r.data) {
+            r.name, rtype, class, r.ttl,
+            switch (r.data) {
                 .a => 4,
                 .aaaa => 16,
                 .cname, .soa, ._null => @as(usize, 0),
