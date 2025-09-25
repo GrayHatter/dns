@@ -154,7 +154,7 @@ fn core(
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
-            log.debug("name {s}", .{q.name});
+            log.err("name {s}", .{q.name});
 
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {

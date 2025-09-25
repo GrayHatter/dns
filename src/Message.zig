@@ -115,6 +115,7 @@ pub const Resource = struct {
             expire: u32,
             minimum: u32,
         },
+        EDNS: []const u8,
         _null: void,
     };
 
@@ -126,6 +127,7 @@ pub const Resource = struct {
                 .aaaa => .aaaa,
                 .cname => .cname,
                 .soa => .soa,
+                .EDNS => .EDNS,
                 ._null => unreachable,
             },
             .class = .in,
@@ -164,6 +166,11 @@ pub const Resource = struct {
                 idx += try Label.writeName(name, w);
             },
             .soa, ._null => unreachable,
+            .EDNS => |edns| {
+                try w.writeInt(u16, @intCast(edns.len), .big);
+                try w.writeAll(edns);
+                idx += edns.len;
+            },
         }
 
         return idx;
@@ -189,7 +196,7 @@ pub const Resource = struct {
         const rtype = @tagName(r.rtype);
         const class = switch (r.class) {
             inline else => @tagName(r.class),
-            _ => "other",
+            _ => "NOS",
         };
 
         try w.print(block, .{
@@ -198,6 +205,7 @@ pub const Resource = struct {
                 .a => 4,
                 .aaaa => 16,
                 .cname, .soa, ._null => @as(usize, 0),
+                .EDNS => @intFromEnum(r.class),
             },
         });
     }
@@ -342,7 +350,7 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                     .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][12..16].*))),
                     .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][16..20].*))),
                 } },
-                .EDNS => .{ ._null = {} },
+                .EDNS => .{ .EDNS = msg.bytes[idx..][0..rdlen] },
                 .https => .{ ._null = {} },
                 else => |err| {
                     log.err("not implemented {}", .{err});
@@ -543,6 +551,43 @@ test "Message.1" {
         104, 110, 110, 110, 109, 97,  110, 110, 101, 110, 6,   97,  107,
         97,  109, 97,  105, 192, 26,  103, 212, 110, 234, 0,   0,   3,
         232, 0,   0,   3,   232, 0,   0,   3,   232, 0,   0,   7,   8,
+    };
+
+    var msg1 = try Message.fromBytes(&source_bytes);
+    var w_b: [source_bytes.len]u8 = undefined;
+    try msg1.parse(std.testing.allocator);
+    defer msg1.questions.?.deinit(std.testing.allocator);
+    defer msg1.answers.?.deinit(std.testing.allocator);
+    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+
+    var fixed: Writer = .fixed(&w_b);
+    _ = try msg1.write(&fixed);
+
+    try std.testing.expectEqualSlices(u8, &source_bytes, &w_b);
+}
+
+test "arcount > 0" {
+    const source_bytes = [_]u8{
+        206, 157,
+        1,   0,
+        0, 1, // qdcount = 1
+        0, 0,
+        0, 0,
+        0, 1, // arcount = 1
+        6, 97, 108, 101, 114, 116, 115, // alerts
+        14, 104, 111, 109, 101, 45, 97, 115, 115, 105, 115, 116, 97, 110, 116, // home-assisstant
+        2, 105, 111, // io
+        0, // null
+        0, 1, // type
+        0, 1, // class
+        //
+        0, // name
+        0, 41, // type
+        4, 208, // class
+        0, 0, 0, 0, // ttl
+        0, 12, // size
+        0, 10, 0, 8, 71, 81, 31, 7, 45, 247, 239, 125, // rdata
     };
 
     var msg1 = try Message.fromBytes(&source_bytes);
