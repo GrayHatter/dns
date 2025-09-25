@@ -49,7 +49,7 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
     std.posix.exit(1);
 }
 
-fn cachedAnswer(
+fn sendCachedAnswer(
     qid: u16,
     name: []const u8,
     qdcount: u16,
@@ -60,6 +60,7 @@ fn cachedAnswer(
     addr: std.net.Address,
 ) !bool {
     var res_buff: [20]RData = undefined;
+    var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
     const now: Timestamp = .init(std.time.timestamp());
     zone.hits += 1;
     log.err("{} hits for domain {s}", .{ zone.hits, name });
@@ -89,13 +90,14 @@ fn cachedAnswer(
                         log.err("a request is null {s}", .{domain.zone});
                         return false;
                     }
-                    const res_list: []RData = res_buff[0..c_result.a.items.len];
-                    for (c_result.a.items, res_list) |src, *dst| {
-                        dst.* = .{ .a = src };
+                    for (c_result.a.items) |src| {
+                        try addr_list.appendBounded(.{ .a = src });
                     }
-                    const ans: DNS.Message = try .answer(qid, &[1]DNS.Message.AnswerData{
-                        .{ .fqdn = name, .ips = res_list },
-                    }, &ans_bytes);
+                    const ans: DNS.Message = try .answer(
+                        qid,
+                        &[1]DNS.Message.AnswerData{.{ .fqdn = name, .ips = addr_list.items }},
+                        &ans_bytes,
+                    );
                     log.info("cached answer {any}", .{ans.bytes});
                     //std.time.sleep(100_000);
                     try downstream.sendTo(addr, ans.bytes);
@@ -108,13 +110,14 @@ fn cachedAnswer(
                         log.err("aaaa request is null {s}", .{domain.zone});
                         return false;
                     }
-                    const res_list: []RData = res_buff[0..c_result.aaaa.items.len];
-                    for (c_result.aaaa.items, res_list) |src, *dst| {
-                        dst.* = .{ .aaaa = src };
+                    for (c_result.aaaa.items) |src| {
+                        try addr_list.appendBounded(.{ .aaaa = src });
                     }
-                    const ans: DNS.Message = try .answer(qid, &[1]DNS.Message.AnswerData{
-                        .{ .fqdn = name, .ips = res_list },
-                    }, &ans_bytes);
+                    const ans: DNS.Message = try .answer(
+                        qid,
+                        &[1]DNS.Message.AnswerData{.{ .fqdn = name, .ips = addr_list.items }},
+                        &ans_bytes,
+                    );
                     try downstream.sendTo(addr, ans.bytes);
                     std.debug.print("{f}\n", .{ans.header});
                     return true;
@@ -175,7 +178,7 @@ fn core(
 
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
             if (tld.zones.getKeyPtr(lzone)) |zone| {
-                if (try cachedAnswer(
+                if (sendCachedAnswer(
                     msg.header.id,
                     q.name,
                     msg.header.qdcount,
@@ -184,9 +187,9 @@ fn core(
                     zone,
                     downstream,
                     addr,
-                )) {
-                    return true;
-                }
+                )) |sent| {
+                    if (sent) return true;
+                } else |err| return err;
             } else {
                 log.err("cache missing going to upstream", .{});
             }
