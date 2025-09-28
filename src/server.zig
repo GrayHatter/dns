@@ -8,11 +8,11 @@ const upstreams: [4]DaemonPeer = .{
 };
 
 pub const std_options: std.Options = .{
-    .log_level = .warn,
+    .log_level = .debug,
     .logFn = logFunc,
 };
 
-var log_target_level: log.Level = .warn;
+var log_level_target: log.Level = .warn;
 
 pub fn logFunc(
     comptime message_level: log.Level,
@@ -20,7 +20,7 @@ pub fn logFunc(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(message_level) > @intFromEnum(log_target_level)) return;
+    if (@intFromEnum(message_level) > @intFromEnum(log_level_target)) return;
 
     var buffer: [64]u8 = undefined;
     const stderr = std.debug.lockStderrWriter(&buffer);
@@ -39,6 +39,8 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
         \\Config Options:
         \\  -c, --config             - [ ] TODO document
         \\                           - [ ] add config support
+        \\  --debug                 enable debugging output
+        \\  --debug-extra           enable verbose debugging output
         \\
         \\Custom Blocking Options:
         \\  --block <config_file>    TODO document
@@ -63,7 +65,7 @@ fn sendCachedAnswer(
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
     const now: Timestamp = .init(std.time.timestamp());
     zone.hits += 1;
-    log.err("{} hits for domain {s}", .{ zone.hits, name });
+    log.err("    {} hits for [{s}]", .{ zone.hits, name });
     var ans_bytes: [512]u8 = undefined;
     switch (zone.behavior) {
         .nxdomain => {
@@ -78,7 +80,7 @@ fn sendCachedAnswer(
         },
         .cached => |c_result| {
             if (c_result.expires.expired(now)) {
-                log.err(
+                log.debug(
                     "cached {s} ttl expired {} ({})",
                     .{ domain.zone, @intFromEnum(now) - @intFromEnum(c_result.expires), c_result.expires },
                 );
@@ -119,7 +121,7 @@ fn sendCachedAnswer(
                         &ans_bytes,
                     );
                     try downstream.sendTo(addr, ans.bytes);
-                    std.debug.print("{f}\n", .{ans.header});
+                    log.info("{f}\n", .{ans.header});
                     return true;
                 },
                 else => return false,
@@ -142,7 +144,7 @@ fn core(
     const now: Timestamp = .init(std.time.timestamp());
     const msg = try DNS.Message.fromBytes(in_msg);
 
-    log.err("incoming packet\n{f}", .{msg.header});
+    log.info("incoming packet\n{f}", .{msg.header});
 
     if (msg.header.qdcount >= 16) {
         log.err("dropping invalid msg", .{});
@@ -157,7 +159,7 @@ fn core(
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
-            log.err("name {s}", .{q.name});
+            log.err("query:  [ {s} ]", .{q.name});
 
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
@@ -191,13 +193,13 @@ fn core(
                     if (sent) return true;
                 } else |err| return err;
             } else {
-                log.err("cache missing going to upstream", .{});
+                log.err("    cache missing going to upstream", .{});
             }
         },
         .answer => break,
     };
 
-    log.err("hitting upstream {any}", .{@as(*const [4]u8, @ptrCast(&upstream.addr.in.sa.addr))});
+    log.debug("hitting upstream {any}", .{@as(*const [4]u8, @ptrCast(&upstream.addr.in.sa.addr))});
     //log.info("bounce", .{});
     try upstream.send(in_msg);
     var relay_buf: [1024]u8 = undefined;
@@ -223,7 +225,7 @@ fn core(
     }
 
     for (blocked_ips) |banned| {
-        if (std.mem.eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
+        if (eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
             @memset(relayed[relayed.len - 4 .. relayed.len], 0);
         }
     }
@@ -235,7 +237,7 @@ fn core(
     const rmsg: DNS.Message = try .fromBytes(relayed);
     if (rmsg.header.qdcount != 1) return false;
 
-    log.err("answer from upstream:\n{f}", .{rmsg.header});
+    log.debug("answer from upstream:\n{f}", .{rmsg.header});
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
@@ -267,14 +269,14 @@ fn core(
             lzone = .{ .name = try cache.store(domain.zone) };
             log.debug("r question = {s}", .{q.name});
             log.debug("r question = \n{f}", .{q});
-            log.err("{f}", .{q});
+            log.info("{f}", .{q});
         },
         .answer => |r| {
             suggested = suggested.min(r.ttl);
             log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = \n{f}", .{r});
-            log.err("{f}", .{r});
+            log.info("{f}", .{r});
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) {
@@ -300,8 +302,8 @@ fn core(
                     .a => try zone.behavior.cached.a.append(a, r.data.a),
                     .aaaa => try zone.behavior.cached.aaaa.append(a, r.data.aaaa),
                     .soa => {
-                        log.err("r               {s}", .{r.data.soa.mname});
-                        log.err("r               {s}", .{r.data.soa.rname});
+                        log.debug("r               {s}", .{r.data.soa.mname});
+                        log.debug("r               {s}", .{r.data.soa.rname});
                     },
                     else => {},
                 }
@@ -340,9 +342,9 @@ pub fn main() !void {
     var argv = std.process.args();
     const arg0 = argv.next().?;
     while (argv.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--block")) {
+        if (eql(u8, arg, "--block")) {
             try blocks.append(a, argv.next() orelse usage(arg0, "<config file> missing for --block"));
-        } else if (std.mem.eql(u8, arg, "--drop-ip")) {
+        } else if (eql(u8, arg, "--drop-ip")) {
             const ip_str = argv.next() orelse usage(arg0, "<ip address> missing for --drop-ip");
             var ip: [4]u8 = undefined;
             var itr = std.mem.splitScalar(u8, ip_str, '.');
@@ -350,15 +352,20 @@ pub fn main() !void {
                 oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
             }
             try blocked_ips_.append(a, ip);
-        } else if (std.mem.eql(u8, arg, "--drop-domain")) {
+        } else if (eql(u8, arg, "--drop-domain")) {
             const domain_str = argv.next() orelse usage(arg0, "<fqdn> missing for --drop-domain");
             try blocked_domains.append(a, try a.dupe(u8, domain_str));
-        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+        } else if (eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             usage(arg0, null);
+        } else if (eql(u8, arg, "--debug")) {
+            log_level_target = .info;
+        } else if (eql(u8, arg, "--debug-extra")) {
+            log_level_target = .debug;
         } else {
             usage(arg0, "invalid arg given");
         }
     }
+
     blocked_ips = blocked_ips_.items;
 
     const downstream: network.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
@@ -386,10 +393,10 @@ pub fn main() !void {
     }
 
     const file_hosts = try readFile("/etc/hosts");
-    log.debug("file\n {s}", .{file_hosts});
+    //log.debug("file\n {s}", .{file_hosts});
     const host_lines = try parse(a, file_hosts);
     for (host_lines) |line| {
-        std.debug.print("host line {s} {f}\n", .{ line.fqdn, line.addr });
+        log.debug("host line {s} {f}", .{ line.fqdn, line.addr });
     }
     a.free(host_lines);
 
@@ -442,9 +449,9 @@ pub fn main() !void {
             },
         };
         if (cached) {
-            log.err("cached response {d}us", .{timer.lap() / 1000});
+            log.err("    cached response {d}us", .{timer.lap() / 1000});
         } else {
-            log.err("{f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+            log.err("    {f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
         }
     }
 
@@ -735,5 +742,6 @@ const std = @import("std");
 const log = std.log;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
+const eql = std.mem.eql;
 const indexOfAny = std.mem.indexOfAny;
 const indexOfScalar = std.mem.indexOfScalar;
