@@ -449,9 +449,9 @@ pub fn main() !void {
             },
         };
         if (cached) {
-            log.err("    cached response {d}us", .{timer.lap() / 1000});
+            log.err("    **    cached response {d}us", .{timer.lap() / 1000});
         } else {
-            log.err("    {f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+            log.err("    ->    {f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
         }
     }
 
