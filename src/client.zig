@@ -1,6 +1,10 @@
 pub fn main() !void {
     log.err("started", .{});
 
+    var threaded: std.Io.Threaded = .init_single_threaded;
+    defer threaded.deinit();
+    const io = threaded.io();
+
     var domain: ?[]const u8 = null;
     var nameserver: [4]u8 = @splat(0);
     var argsi = std.process.args();
@@ -15,7 +19,8 @@ pub fn main() !void {
         }
     }
 
-    const upstream = try network.Peer.connect(nameserver, 53);
+    const addr: net.IpAddress = .{ .ip4 = .{ .bytes = nameserver, .port = 53 } };
+    const upstream: net.Stream = try addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
 
     var request: [1024]u8 = undefined;
     const msg = try DNS.Message.query(&[1][]const u8{domain orelse "gr.ht."}, &request);
@@ -24,13 +29,18 @@ pub fn main() !void {
     log.err("data {any}", .{request[0..msg.bytes.len]});
     log.err("data {s}", .{request[0..msg.bytes.len]});
 
-    try upstream.send(request[0..msg.bytes.len]);
+    var w_b: [512]u8 = undefined;
+    var w = upstream.writer(io, &w_b);
+    var r_b: [512]u8 = undefined;
+    var r = upstream.reader(io, &r_b);
 
-    var buffer: [1024]u8 = undefined;
-    const icnt = try upstream.recv(&buffer);
-    log.err("received {}", .{icnt});
-    log.err("data {any}", .{buffer[0..icnt]});
-    log.err("data {s}", .{buffer[0..icnt]});
+    try w.interface.writeAll(request[0..msg.bytes.len]);
+
+    try r.interface.fillMore();
+    const buffer = r.interface.buffered();
+    log.err("received {}", .{buffer.len});
+    log.err("data {any}", .{buffer});
+    log.err("data {s}", .{buffer});
 
     log.err("done", .{});
 }
@@ -40,9 +50,10 @@ test main {
 }
 
 const DNS = @import("dns.zig");
-const network = @import("network.zig");
 
 const std = @import("std");
+const Io = std.Io;
+const net = Io.net;
 const log = std.log;
 const Allocator = std.mem.Allocator;
 const indexOfScalar = std.mem.indexOfScalar;

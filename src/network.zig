@@ -1,19 +1,21 @@
 pub const Peer = struct {
-    addr: std.net.Address,
-    sock: std.posix.socket_t,
+    addr: Io.net.IpAddress,
+    sock: Io.net.Socket,
 
     const Options = struct {
         recv_timeout_us: ?u32 = null,
     };
 
     /// TODO ipv6
-    pub fn init(addr_ip: [4]u8, port: u16) !Peer {
+    pub fn init(addr_ip: [4]u8, port: u16, io: Io) !Peer {
+        const addr: Io.net.IpAddress = .{ .ip4 = .{
+            .bytes = addr_ip,
+            .port = nativeToBig(u16, port),
+        } };
+
         const up: Peer = .{
-            .addr = .{ .in = .{ .sa = .{
-                .port = nativeToBig(u16, port),
-                .addr = bytesToValue(u32, &addr_ip),
-            } } },
-            .sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0),
+            .addr = addr,
+            .sock = addr.bind(io, .{ .mode = .dgram, .protocol = .udp }),
         };
         return up;
     }
@@ -34,12 +36,6 @@ pub const Peer = struct {
 
     pub fn connect(addr_ip: [4]u8, port: u16) !Peer {
         return try connectOptions(addr_ip, port, .{ .recv_timeout_us = 800000 });
-    }
-
-    pub fn listen(addr_ip: [4]u8, port: u16) !Peer {
-        const up: Peer = try .init(addr_ip, port);
-        try std.posix.bind(up.sock, &up.addr.any, up.addr.getOsSockLen());
-        return up;
     }
 
     pub fn send(upstrm: Peer, data: []const u8) !void {
@@ -75,6 +71,7 @@ pub const Peer = struct {
 };
 
 const std = @import("std");
+const Io = std.Io;
 const sys = struct {
     const timeval = std.os.linux.timeval;
     const SOCKET = std.os.linux.SOL.SOCKET;

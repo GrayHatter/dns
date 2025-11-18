@@ -22,10 +22,11 @@ pub fn logFunc(
 ) void {
     if (@intFromEnum(message_level) > @intFromEnum(log_level_target)) return;
 
-    var buffer: [64]u8 = undefined;
-    const stderr = std.debug.lockStderrWriter(&buffer);
+    var buffer: [512]u8 = undefined;
+    const stderr, const errcfg = std.debug.lockStderrWriter(&buffer);
+    _ = errcfg;
     defer std.debug.unlockStderrWriter();
-    nosuspend stderr.print(format ++ "\n", args) catch return;
+    stderr.print(format ++ "\n", args) catch return;
 }
 
 fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
@@ -58,12 +59,13 @@ fn sendCachedAnswer(
     qtype: DNS.Message.Type,
     domain: *const Domain,
     zone: *Zone,
-    downstream: network.Peer,
-    addr: std.net.Address,
+    downstream: net.Socket,
+    addr: net.IpAddress,
+    io: Io,
 ) !bool {
     var res_buff: [20]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
-    const now: Timestamp = .init(std.time.timestamp());
+    const now: Timestamp = .init((try Io.Clock.real.now(io)).toSeconds());
     zone.hits += 1;
     log.err("    {} hits for [{s}]", .{ zone.hits, name });
     var ans_bytes: [512]u8 = undefined;
@@ -71,7 +73,7 @@ fn sendCachedAnswer(
         .nxdomain => {
             if (qdcount == 1) {
                 const ans: DNS.Message = try .answerDrop(qid, name, &ans_bytes);
-                try downstream.sendTo(addr, ans.bytes);
+                try downstream.send(io, &addr, ans.bytes);
                 log.err("dropping request for {s}", .{name});
                 return true;
             }
@@ -102,7 +104,7 @@ fn sendCachedAnswer(
                     );
                     log.info("cached answer {any}", .{ans.bytes});
                     //std.time.sleep(100_000);
-                    try downstream.sendTo(addr, ans.bytes);
+                    try downstream.send(io, &addr, ans.bytes);
                     return true;
                 },
 
@@ -120,7 +122,7 @@ fn sendCachedAnswer(
                         &[1]DNS.Message.AnswerData{.{ .fqdn = name, .ips = addr_list.items }},
                         &ans_bytes,
                     );
-                    try downstream.sendTo(addr, ans.bytes);
+                    try downstream.send(io, &addr, ans.bytes);
                     log.info("{f}\n", .{ans.header});
                     return true;
                 },
@@ -134,14 +136,15 @@ fn sendCachedAnswer(
 }
 
 fn core(
-    a: Allocator,
     cache: *ZoneCache,
     in_msg: []const u8,
-    downstream: network.Peer,
-    addr: std.net.Address,
-    upstream: network.Peer,
+    downstream: net.Socket,
+    addr: net.IpAddress,
+    upstream: net.Stream,
+    a: Allocator,
+    io: Io,
 ) !bool {
-    const now: Timestamp = .init(std.time.timestamp());
+    const now: Timestamp = .init((try Io.Clock.real.now(io)).toSeconds());
     const msg = try DNS.Message.fromBytes(in_msg);
 
     log.info("incoming packet\n{f}", .{msg.header});
@@ -189,6 +192,7 @@ fn core(
                     zone,
                     downstream,
                     addr,
+                    io,
                 )) |sent| {
                     if (sent) return true;
                 } else |err| return err;
@@ -199,42 +203,35 @@ fn core(
         .answer => break,
     };
 
-    log.debug("hitting upstream {any}", .{@as(*const [4]u8, @ptrCast(&upstream.addr.in.sa.addr))});
+    log.debug("hitting upstream {any}", .{upstream.socket.address});
     //log.info("bounce", .{});
-    try upstream.send(in_msg);
+    var w = upstream.writer(io, &.{});
+    try w.interface.writeAll(in_msg);
     var relay_buf: [1024]u8 = undefined;
-    const b_cnt = upstream.recv(&relay_buf) catch |err| again: switch (err) {
-        error.WouldBlock => {
-            //try upstream.send(in_msg);
-            break :again upstream.recv(&relay_buf) catch |err2| {
-                log.err("unable to communicate with upstream {f} timed out twice", .{upstream.addr});
-                return err2;
-            };
-        },
-        else => return err,
-    };
-    const relayed = relay_buf[0..b_cnt];
-    log.info("bounce received {}", .{b_cnt});
-    log.debug("bounce data {any}", .{relayed});
+    var reader = upstream.reader(io, &relay_buf);
+    reader.interface.fillMore() catch @panic("fixme");
+    const recv_msg = reader.interface.buffered();
+    log.info("bounce received {}", .{recv_msg.len});
+    log.debug("bounce data {any}", .{recv_msg});
     if (!std.mem.eql(u8, relay_buf[0..2], in_msg[0..2])) {
         // drop 2 messages or 2 timeouts
-        _ = upstream.recv(&relay_buf) catch 0;
-        _ = upstream.recv(&relay_buf) catch 0;
-        log.err("out of order messages with upstream {f} resetting", .{upstream.addr});
+        //_ = upstream.recv(&relay_buf) catch 0;
+        //_ = upstream.recv(&relay_buf) catch 0;
+        log.err("out of order messages with upstream {any} resetting", .{upstream.socket.address});
         return error.OutOfOrderMessages;
     }
 
     for (blocked_ips) |banned| {
-        if (eql(u8, relayed[relayed.len - 4 .. relayed.len], &banned)) {
-            @memset(relayed[relayed.len - 4 .. relayed.len], 0);
+        if (eql(u8, recv_msg[recv_msg.len - 4 .. recv_msg.len], &banned)) {
+            @memset(recv_msg[recv_msg.len - 4 .. recv_msg.len], 0);
         }
     }
 
     //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
 
-    try downstream.sendTo(addr, relay_buf[0..b_cnt]);
+    try downstream.send(io, &addr, recv_msg);
 
-    const rmsg: DNS.Message = try .fromBytes(relayed);
+    const rmsg: DNS.Message = try .fromBytes(recv_msg);
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
@@ -246,7 +243,7 @@ fn core(
     var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
         log.err("relayed iter error {}", .{err});
-        log.err("rdata {any}", .{relayed});
+        log.err("rdata {any}", .{recv_msg});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
@@ -315,14 +312,15 @@ fn core(
 }
 
 fn managedCore(
-    a: Allocator,
     cache: *ZoneCache,
     in_msg: []const u8,
-    downstream: network.Peer,
-    addr: std.net.Address,
-    upstream: network.Peer,
+    downstream: net.Socket,
+    addr: net.IpAddress,
+    upstream: net.Stream,
+    a: Allocator,
+    io: Io,
 ) void {
-    core(a, cache, in_msg, downstream, addr, upstream) catch |err| switch (err) {
+    core(cache, in_msg, downstream, addr, upstream, a, io) catch |err| switch (err) {
         error.WouldBlock => return,
         error.OutOfOrderMessages => return,
         else => {
@@ -334,6 +332,9 @@ fn managedCore(
 
 pub fn main() !void {
     const a = std.heap.smp_allocator;
+    var threaded: std.Io.Threaded = .init(a);
+    defer threaded.deinit();
+    const io = threaded.io();
 
     var blocks: std.ArrayListUnmanaged([]const u8) = .{};
     var blocked_ips_: std.ArrayListUnmanaged([4]u8) = .{};
@@ -368,7 +369,11 @@ pub fn main() !void {
 
     blocked_ips = blocked_ips_.items;
 
-    const downstream: network.Peer = try .listen(.{ 0, 0, 0, 0 }, 53);
+    const host: net.IpAddress = .{ .ip4 = .{
+        .bytes = .{ 0, 0, 0, 0 },
+        .port = 53,
+    } };
+    const downstream: net.Socket = try host.bind(io, .{ .mode = .dgram, .protocol = .udp });
 
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
@@ -381,24 +386,37 @@ pub fn main() !void {
 
     var cache: ZoneCache = .{ .alloc = a };
 
-    const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht", "rs" };
+    const preload_tlds = [_][]const u8{
+        "com",
+        "net",
+        "org",
+        "tv",
+        "ht",
+        "rs",
+    };
     for (preload_tlds) |ptld| {
         try cache.tld.put(a, ptld, .{
             .name = try cache.store(ptld),
         });
     }
 
+    var blocked_results: ArrayList(Result) = .{};
+    defer blocked_results.clearAndFree(a);
+    const cwd = std.fs.cwd();
     for (blocks.items) |b| {
-        a.free(try parse(a, b));
+        const file = cwd.openFile(b, .{}) catch continue;
+        defer file.close();
+        var r_b: [2048]u8 = undefined;
+        var r = file.reader(io, &r_b);
+        try parseHostFile(&blocked_results, &r.interface, a);
     }
 
-    const file_hosts = try readFile("/etc/hosts");
-    //log.debug("file\n {s}", .{file_hosts});
-    const host_lines = try parse(a, file_hosts);
-    for (host_lines) |line| {
+    var local_results: ArrayList(Result) = .{};
+    defer local_results.clearAndFree(a);
+    try parseHosts(&local_results, a, io);
+    for (local_results.items) |line| {
         log.debug("host line {s} {f}", .{ line.fqdn, line.addr });
     }
-    a.free(host_lines);
 
     for (blocked_domains.items) |dd| {
         const domain: Domain = .init(dd);
@@ -418,9 +436,10 @@ pub fn main() !void {
         });
     }
 
-    var upconns: [4]network.Peer = undefined;
+    var upconns: [4]net.Stream = undefined;
     for (&upconns, upstreams) |*dst, ip| {
-        dst.* = try .connect(ip.addr.v4, 53);
+        const addr: net.IpAddress = .{ .ip4 = .{ .bytes = ip.addr.v4, .port = 53 } };
+        dst.* = try addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
     }
     var up_idx: u2 = 0;
 
@@ -430,19 +449,19 @@ pub fn main() !void {
     var timer: std.time.Timer = try .start();
     while (true) {
         defer up_idx +%= 1;
-        var addr: std.net.Address = .{ .in = .{ .sa = .{ .port = 0, .addr = 0 } } };
         var buffer: [1024]u8 = undefined;
-        const icnt = try downstream.recvFrom(&buffer, &addr);
+        const msg = try downstream.receive(io, &buffer);
+
         timer.reset();
-        log.info("received {}", .{icnt});
-        log.debug("data {any}", .{buffer[0..icnt]});
-        log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&addr.in.sa.addr))});
+        log.info("received {}", .{msg.data.len});
+        log.debug("data {any}", .{msg.data});
+        log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
         //const current_time = std.time.timestamp();
         //try tpool.spawn(managedCore, .{ a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx] });
 
-        const cached = core(a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx]) catch |err| switch (err) {
-            error.WouldBlock => continue,
-            error.OutOfOrderMessages => continue,
+        const cached = core(&cache, msg.data, downstream, msg.from, upconns[up_idx], a, io) catch |err| switch (err) {
+            //error.WouldBlock => continue,
+            //error.OutOfOrderMessages => continue,
             else => {
                 log.err("core error: {}", .{err});
                 return err;
@@ -451,35 +470,11 @@ pub fn main() !void {
         if (cached) {
             log.err("    **    cached response {d}us", .{timer.lap() / 1000});
         } else {
-            log.err("    ->    {f} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+            log.err("    ->    {any} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
         }
     }
 
     log.err("done", .{});
-}
-
-fn readFile(name: []const u8) ![]const u8 {
-    var file = try std.fs.cwd().openFile(name, .{ .mode = .read_only });
-    defer file.close();
-    return try mmap(file);
-}
-
-fn mmap(fd: std.fs.File) ![]const u8 {
-    const stat = try fd.stat();
-
-    const ptr: [*]u8 = @ptrFromInt(std.os.linux.mmap(
-        null,
-        stat.size,
-        std.os.linux.PROT.READ,
-        std.os.linux.MAP{ .TYPE = .PRIVATE },
-        fd.handle,
-        0,
-    ));
-    return ptr[0..stat.size];
-}
-
-fn munmap(ptr: []const u8) !void {
-    std.os.linux.munmap(ptr.ptr, ptr.len);
 }
 
 pub const Timestamp = enum(i64) {
@@ -673,7 +668,7 @@ fn parseFQDN(in: []const u8) ![]const u8 {
 }
 
 fn parseLine(a: Allocator, line: []const u8, list: *ArrayList(Result)) !void {
-    const trimmed = std.mem.trim(u8, line, &std.ascii.whitespace);
+    const trimmed = trim(u8, line, &std.ascii.whitespace);
     if (trimmed.len == 0) return error.Skip;
     if (trimmed[0] == '#') {
         log.debug("skip '{s}'", .{line});
@@ -682,20 +677,20 @@ fn parseLine(a: Allocator, line: []const u8, list: *ArrayList(Result)) !void {
 
     if (indexOfAny(u8, trimmed, &std.ascii.whitespace)) |i| {
         const addr = trimmed[0..i];
-        const names = std.mem.trim(u8, trimmed[i..], &std.ascii.whitespace);
+        const names = trim(u8, trimmed[i..], &std.ascii.whitespace);
 
         const r_addr = if (indexOfScalar(u8, addr, ':')) |_|
-            try parseAAAA(std.mem.trim(u8, addr, &std.ascii.whitespace))
+            try parseAAAA(trim(u8, addr, &std.ascii.whitespace))
         else
-            try parseA(std.mem.trim(u8, addr, &std.ascii.whitespace));
+            try parseA(trim(u8, addr, &std.ascii.whitespace));
 
-        var names_itr = std.mem.tokenizeAny(u8, names, &std.ascii.whitespace);
+        var names_itr = tokenizeAny(u8, names, &std.ascii.whitespace);
         while (names_itr.next()) |name| {
             const parsed = parseFQDN(name) catch |err| {
                 log.err("fqdn error {}", .{err});
                 continue;
             };
-            try list.append(a, .{ .fqdn = parsed, .addr = r_addr });
+            try list.append(a, .{ .fqdn = try a.dupe(u8, parsed), .addr = r_addr });
         }
     }
 }
@@ -709,25 +704,48 @@ test parseLine {
 
     try std.testing.expectEqual(@as(usize, 1), list.items.len);
     try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[0]);
-    try parseLine(a, "127.0.0.1 blerg blerg blerg", &list);
+    try parseLine(a, "127.0.0.1 blerg blerg2 blerg.4", &list);
     try std.testing.expectEqual(@as(usize, 4), list.items.len);
     try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[1]);
-    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[2]);
-    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[3]);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg2", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[2]);
+    try std.testing.expectEqualDeep(Result{ .fqdn = "blerg.4", .addr = .{ .a = .{ 127, 0, 0, 1 } } }, list.items[3]);
+    for (list.items) |line| {
+        a.free(line.fqdn);
+    }
 }
 
-fn parse(a: Allocator, blob: []const u8) ![]Result {
+fn parseHosts(list: *ArrayList(Result), a: Allocator, io: Io) !void {
+    const file = std.fs.openFileAbsolute("/etc/hosts", .{}) catch return;
+    defer file.close();
+    var r_b: [2048]u8 = undefined;
+    var r = file.reader(io, &r_b);
+
+    return parseHostFile(list, &r.interface, a);
+}
+
+/// callers can prefill the buffer to get some performance on huge files
+fn parseHostFile(list: *ArrayList(Result), r: *Reader, a: Allocator) !void {
     // 21 bytes per line for the test file
-    const base_count = blob.len / 21;
-    var list: ArrayList(Result) = try .initCapacity(a, base_count);
-    errdefer list.clearAndFree(a);
+    try list.ensureUnusedCapacity(a, r.bufferedLen() / 21);
 
-    var lines_itr = std.mem.tokenizeScalar(u8, blob, '\n');
-    while (lines_itr.next()) |line| {
-        parseLine(a, line, &list) catch continue;
+    while (r.takeDelimiterInclusive('\n')) |line| {
+        parseLine(a, line, list) catch continue;
+    } else |err| switch (err) {
+        error.EndOfStream => return,
+        else => return err,
     }
+}
 
-    return try list.toOwnedSlice(a);
+test parseHostFile {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var local_results: ArrayList(Result) = .{};
+    defer local_results.clearAndFree(a);
+    try parseHosts(&local_results, a, io);
+    for (local_results.items) |line| {
+        log.debug("host line {s} {f}", .{ line.fqdn, line.addr });
+        a.free(line.fqdn);
+    }
 }
 
 test main {
@@ -735,13 +753,18 @@ test main {
 }
 
 const DNS = @import("dns.zig");
-const network = @import("network.zig");
 const RData = DNS.Message.Resource.RData;
 
 const std = @import("std");
+const File = std.fs.File;
+const Io = std.Io;
+const Reader = Io.Reader;
+const net = Io.net;
 const log = std.log;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const eql = std.mem.eql;
+const trim = std.mem.trim;
 const indexOfAny = std.mem.indexOfAny;
 const indexOfScalar = std.mem.indexOfScalar;
+const tokenizeAny = std.mem.tokenizeAny;
