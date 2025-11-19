@@ -65,7 +65,7 @@ fn sendCachedAnswer(
 ) !bool {
     var res_buff: [20]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
-    const now: Timestamp = .init((try Io.Clock.real.now(io)).toSeconds());
+    const now: Io.Timestamp = try Io.Clock.real.now(io);
     zone.hits += 1;
     log.err("    {} hits for [{s}]", .{ zone.hits, name });
     var ans_bytes: [512]u8 = undefined;
@@ -81,10 +81,10 @@ fn sendCachedAnswer(
             return false;
         },
         .cached => |c_result| {
-            if (c_result.expires.expired(now)) {
+            if (c_result.expires.nanoseconds < now.nanoseconds) {
                 log.debug(
                     "cached {s} ttl expired {} ({})",
-                    .{ domain.zone, @intFromEnum(now) - @intFromEnum(c_result.expires), c_result.expires },
+                    .{ domain.zone, now.toSeconds() - c_result.expires.toSeconds(), c_result.expires },
                 );
                 return false;
             }
@@ -95,7 +95,7 @@ fn sendCachedAnswer(
                         return false;
                     }
                     for (c_result.a.items) |src| {
-                        try addr_list.appendBounded(.{ .a = src });
+                        try addr_list.appendBounded(.{ .a = src.bytes });
                     }
                     const ans: DNS.Message = try .answer(
                         qid,
@@ -115,7 +115,7 @@ fn sendCachedAnswer(
                         return false;
                     }
                     for (c_result.aaaa.items) |src| {
-                        try addr_list.appendBounded(.{ .aaaa = src });
+                        try addr_list.appendBounded(.{ .aaaa = src.bytes });
                     }
                     const ans: DNS.Message = try .answer(
                         qid,
@@ -144,8 +144,8 @@ fn core(
     a: Allocator,
     io: Io,
 ) !bool {
-    const now: Timestamp = .init((try Io.Clock.real.now(io)).toSeconds());
-    const msg = try DNS.Message.fromBytes(in_msg);
+    const now: Io.Timestamp = try Io.Clock.real.now(io);
+    const msg: DNS.Message = try .fromBytes(in_msg);
 
     log.info("incoming packet\n{f}", .{msg.header});
 
@@ -269,7 +269,7 @@ fn core(
             log.info("{f}", .{q});
         },
         .answer => |r| {
-            suggested = suggested.min(r.ttl);
+            suggested.duration.nanoseconds = @min(r.ttl.duration.nanoseconds, suggested.duration.nanoseconds);
             log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = \n{f}", .{r});
@@ -286,18 +286,18 @@ fn core(
                         };
                     },
                     .cached => {
-                        if (zone.behavior.cached.expires.expired(now)) {
+                        if (zone.behavior.cached.expires.nanoseconds < now.nanoseconds) {
                             zone.behavior.cached.a.clearRetainingCapacity();
                             zone.behavior.cached.aaaa.clearRetainingCapacity();
                         }
-                        zone.behavior.cached.expires = now.ttl(suggested);
+                        zone.behavior.cached.expires = now.addDuration(suggested.duration);
                     },
                     .nxdomain => {},
                 }
 
                 switch (r.rtype) {
-                    .a => try zone.behavior.cached.a.append(a, r.data.a),
-                    .aaaa => try zone.behavior.cached.aaaa.append(a, r.data.aaaa),
+                    .a => try zone.behavior.cached.a.append(a, .{ .bytes = r.data.a, .port = 0 }),
+                    .aaaa => try zone.behavior.cached.aaaa.append(a, .{ .bytes = r.data.aaaa, .port = 0 }),
                     .soa => {
                         log.debug("r               {s}", .{r.data.soa.mname});
                         log.debug("r               {s}", .{r.data.soa.rname});
@@ -438,8 +438,7 @@ pub fn main() !void {
 
     var upconns: [4]net.Stream = undefined;
     for (&upconns, upstreams) |*dst, ip| {
-        const addr: net.IpAddress = .{ .ip4 = .{ .bytes = ip.addr.v4, .port = 53 } };
-        dst.* = try addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
+        dst.* = try ip.addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
     }
     var up_idx: u2 = 0;
 
@@ -477,100 +476,9 @@ pub fn main() !void {
     log.err("done", .{});
 }
 
-pub const Timestamp = enum(i64) {
-    zero = 0,
-    _,
-
-    pub fn init(now: i64) Timestamp {
-        return @enumFromInt(now);
-    }
-
-    pub fn expired(ts: Timestamp, now: Timestamp) bool {
-        const ts_s: i64 = @intFromEnum(ts);
-        const now_s: i64 = @intFromEnum(now);
-        return ts_s < now_s;
-    }
-
-    pub fn ttl(ts: Timestamp, ttl_: DNS.Message.TTL) Timestamp {
-        return @enumFromInt(@intFromEnum(ts) +| @intFromEnum(ttl_));
-    }
-};
-
-pub const Behavior = union(enum) {
-    new: void,
-    nxdomain: u32,
-    cached: Behavior.Result,
-
-    pub const Result = struct {
-        expires: Timestamp = .zero,
-        a: ArrayList(IPv4) = .{},
-        aaaa: ArrayList(IPv6) = .{},
-        cname: ArrayList(u8) = .{},
-    };
-};
-
-const Zone = struct {
-    name: String,
-    zones: std.ArrayHashMapUnmanaged(Zone, void, Hasher, false) = .{},
-    behavior: Behavior = .new,
-    hits: u32 = 0,
-
-    pub const String = enum(u32) {
-        empty,
-        _,
-
-        pub fn slice(str: String, zc: *const ZoneCache) [:0]const u8 {
-            const s = zc.strings.items[@intFromEnum(str)..];
-            const end = std.mem.indexOfScalar(u8, s, 0).?;
-            return s[0..end :0];
-        }
-    };
-
-    pub const Hasher = struct {
-        pub fn hash(_: Hasher, a: Zone) u32 {
-            return @truncate(std.hash.int(@intFromEnum(a.name)));
-        }
-
-        pub fn eql(_: Hasher, a: Zone, b: Zone, _: usize) bool {
-            return a.name == b.name;
-        }
-    };
-};
-
-const ZoneCache = struct {
-    alloc: Allocator,
-    tld: std.StringHashMapUnmanaged(Zone) = .{},
-    strings: std.ArrayListUnmanaged(u8) = .{},
-    loc_table: std.HashMapUnmanaged(
-        u32,
-        void,
-        std.hash_map.StringIndexContext,
-        std.hash_map.default_max_load_percentage,
-    ) = .{},
-
-    pub fn store(zc: *ZoneCache, str: []const u8) !Zone.String {
-        try zc.strings.ensureUnusedCapacity(zc.alloc, str.len + 1);
-        zc.strings.appendSliceAssumeCapacity(str);
-        zc.strings.appendAssumeCapacity(0);
-
-        const str_index: u32 = @intCast(zc.strings.items.len - str.len - 1);
-        const key: []const u8 = zc.strings.items[str_index..][0..str.len :0];
-        const gop = try zc.loc_table.getOrPutContextAdapted(
-            zc.alloc,
-            key,
-            std.hash_map.StringIndexAdapter{ .bytes = &zc.strings },
-            std.hash_map.StringIndexContext{ .bytes = &zc.strings },
-        );
-
-        if (gop.found_existing) {
-            zc.strings.shrinkRetainingCapacity(str_index);
-            return @enumFromInt(gop.key_ptr.*);
-        } else {
-            gop.key_ptr.* = str_index;
-            return @enumFromInt(str_index);
-        }
-    }
-};
+const Behavior = ZoneCache.Behavior;
+const ZoneCache = @import("Cache.zig");
+const Zone = ZoneCache.Zone;
 
 pub const Domain = struct {
     tld: []const u8,
@@ -591,21 +499,13 @@ pub const Domain = struct {
     }
 };
 
-pub const IPv4 = [4]u8;
-pub const IPv6 = [16]u8;
-
-const NetAddress = union(enum) {
-    v4: IPv4,
-    v6: IPv6,
-};
-
 const DaemonPeer = struct {
-    addr: NetAddress,
+    addr: Io.net.IpAddress,
 
-    pub const cloudflare_0: DaemonPeer = .{ .addr = .{ .v4 = .{ 1, 1, 1, 1 } } };
-    pub const cloudflare_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 1, 0, 0, 1 } } };
-    pub const google_0: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 8, 8 } } };
-    pub const google_1: DaemonPeer = .{ .addr = .{ .v4 = .{ 8, 8, 4, 4 } } };
+    pub const cloudflare_0: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 1, 1, 1 }, .port = 53 } } };
+    pub const cloudflare_1: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 0, 0, 1 }, .port = 53 } } };
+    pub const google_0: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 8, 8 }, .port = 53 } } };
+    pub const google_1: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 4, 4 }, .port = 53 } } };
 };
 
 const RecordAddress = union(enum) {
@@ -756,7 +656,6 @@ const DNS = @import("dns.zig");
 const RData = DNS.Message.Resource.RData;
 
 const std = @import("std");
-const File = std.fs.File;
 const Io = std.Io;
 const Reader = Io.Reader;
 const net = Io.net;

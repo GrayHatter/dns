@@ -7,12 +7,13 @@ const Message = @This();
 
 pub const Header = @import("Header.zig").Header;
 
-pub const TTL = enum(u32) {
-    zero = 0,
-    @"1min" = 60,
-    @"5min" = 300,
-    @"10min" = 600,
-    _,
+pub const TTL = struct {
+    duration: Io.Duration,
+
+    pub const zero: TTL = .seconds(0);
+    pub const @"1min": TTL = .seconds(60);
+    pub const @"5min": TTL = .seconds(300);
+    pub const @"10min": TTL = .seconds(600);
 
     pub fn expired(ttl: TTL, now: i64) bool {
         const ttl_s: usize = @intFromEnum(ttl);
@@ -24,23 +25,21 @@ pub const TTL = enum(u32) {
     }
 
     pub fn seconds(s: usize) TTL {
-        return @enumFromInt(s);
+        return .{
+            .duration = .fromSeconds(@intCast(s)),
+        };
     }
 
     pub fn minutes(m: usize) TTL {
         return seconds(m *| 60);
     }
 
-    pub fn plus(ttl: TTL, other: TTL) TTL {
-        return @enumFromInt(@intFromEnum(ttl) + @intFromEnum(other));
+    pub fn write(ttl: TTL, w: *Io.Writer) !void {
+        return try w.writeInt(u32, @intCast(ttl.duration.toSeconds()), .big);
     }
 
-    pub fn min(ttl: TTL, other: TTL) TTL {
-        return @enumFromInt(@min(@intFromEnum(ttl), @intFromEnum(other)));
-    }
-
-    pub fn write(ttl: TTL, w: *std.Io.Writer) !void {
-        return try w.writeInt(u32, @intFromEnum(ttl), .big);
+    pub fn formatNumber(t: TTL, w: *Writer, _: std.fmt.Number) std.Io.Writer.Error!void {
+        try w.print("{}", .{t.duration.toSeconds()});
     }
 };
 
@@ -48,9 +47,6 @@ test TTL {
     try std.testing.expectEqual(TTL.@"1min", TTL.seconds(60));
     try std.testing.expectEqual(TTL.@"5min", TTL.minutes(5));
     try std.testing.expectEqual(TTL.@"10min", TTL.minutes(10));
-
-    const pls: TTL = .plus(.@"5min", .@"5min");
-    try std.testing.expectEqual(pls, TTL.@"10min");
 }
 
 pub const Payload = union(enum) {
@@ -606,6 +602,7 @@ test "arcount > 0" {
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const log = std.log;
 const Writer = std.Io.Writer;
 const ArrayList = std.ArrayList;
