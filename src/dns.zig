@@ -21,35 +21,38 @@ pub const Label = struct {
         return label;
     }
 
-    pub fn getName(buffer: []u8, bytes: []const u8, index: *usize) ![]u8 {
+    pub fn getName(buffer: []u8, r: *Reader) ![]u8 {
         var name: ArrayList(u8) = .{
             .items = buffer,
             .capacity = buffer.len,
         };
         name.items.len = 0;
-        var idx: usize = index.*;
-        var pointered: bool = false;
-        sw: switch (bytes[idx]) {
+        const origin: usize = r.seek;
+        var idx: usize = r.seek;
+        var in_pointer: bool = false;
+        sw: switch (try r.peekByte()) {
             0 => {
-                if (!pointered) index.* = idx + 1;
+                if (!in_pointer) r.seek = idx + 1;
+                if (r.seek < origin) return error.CorruptLabel;
                 return name.items;
             },
             1...63 => |b| {
                 idx += b + 1;
-                if (idx >= bytes.len) return error.InvalidLabel;
-                name.appendSliceAssumeCapacity(bytes[idx - b .. idx]);
-                name.appendAssumeCapacity('.');
-                continue :sw bytes[idx];
+                if (idx >= r.buffer.len) return error.InvalidLabel;
+                try name.appendSliceBounded(r.buffer[idx - b .. idx]);
+                try name.appendBounded('.');
+                continue :sw r.buffer[idx];
             },
             192...255 => |b| {
-                if (!pointered) index.* = idx + 2;
-                pointered = true;
+                if (!in_pointer) r.seek = idx + 2;
+                if (r.seek < origin) return error.CorruptLabel;
+                in_pointer = true;
                 idx += 2;
-                if (idx >= bytes.len) return error.InvalidLabel;
-                const offset: u16 = @as(u16, b & 0b111111) << 8 | bytes[idx - 1];
-                if (offset < 12 or offset >= bytes.len) return error.InvalidLabel;
+                if (idx >= r.buffer.len) return error.InvalidLabel;
+                const offset: u16 = @as(u16, b & 0b111111) << 8 | r.buffer[idx - 1];
+                if (offset < 12 or offset >= r.buffer.len) return error.InvalidLabel;
                 idx = offset;
-                continue :sw bytes[idx];
+                continue :sw r.buffer[idx];
             },
             else => return error.InvalidLabel,
         }
@@ -376,3 +379,4 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const indexOfScalar = std.mem.indexOfScalar;
 const Writer = std.Io.Writer;
+const Reader = std.Io.Reader;

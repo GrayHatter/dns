@@ -24,18 +24,18 @@ pub const TTL = struct {
         return now +| @intFromEnum(ttl);
     }
 
-    pub fn seconds(s: usize) TTL {
+    pub fn seconds(s: isize) TTL {
         return .{
-            .duration = .fromSeconds(@intCast(s)),
+            .duration = .fromSeconds(s),
         };
     }
 
-    pub fn minutes(m: usize) TTL {
+    pub fn minutes(m: isize) TTL {
         return seconds(m *| 60);
     }
 
     pub fn write(ttl: TTL, w: *Io.Writer) !void {
-        return try w.writeInt(u32, @intCast(ttl.duration.toSeconds()), .big);
+        return try w.writeInt(i32, @intCast(ttl.duration.toSeconds()), .big);
     }
 
     pub fn formatNumber(t: TTL, w: *Writer, _: std.fmt.Number) std.Io.Writer.Error!void {
@@ -284,7 +284,11 @@ pub fn iterator(msg: *const Message) Iterator {
 pub fn parse(msg: *Message, a: Allocator) !void {
     var itr = iterator(msg);
     msg.questions = .{};
+    errdefer msg.questions.?.deinit(a);
+    errdefer for (msg.questions.?.items) |q| a.free(q.name);
     msg.answers = .{};
+    errdefer msg.answers.?.deinit(a);
+    errdefer for (msg.answers.?.items) |an| a.free(an.name);
     while (try itr.next()) |pyld| switch (pyld) {
         .question => |q| {
             try msg.questions.?.append(a, q);
@@ -299,54 +303,51 @@ pub fn parse(msg: *Message, a: Allocator) !void {
     };
 }
 
-fn byteSwap(T: type, bytes: [@sizeOf(T)]u8) T {
-    return @byteSwap(@as(u16, @bitCast(bytes)));
-}
-
 pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
     const payload_end = msg.header.qdcount + msg.header.ancount +
         msg.header.nscount + msg.header.arcount;
     if (index >= payload_end) return error.InvalidIndex;
 
-    var idx: usize = 12;
+    //var idx: usize = 12;
+    var r: Reader = .fixed(msg.bytes);
+    _ = try r.discard(.limited(12));
     for (0..payload_end) |payload_idx| {
         if (payload_idx < msg.header.qdcount) {
-            const name = try Label.getName(name_buf, msg.bytes, &idx);
-            if (payload_idx == index) return .{ .question = .{
-                .name = name,
-                .qtype = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*)))),
-                .class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*)))),
-            } };
-            idx += 4;
-            //log.warn("{any}", .{q.*});
+            if (payload_idx == index) {
+                return .{ .question = .{
+                    .name = try Label.getName(name_buf, &r),
+                    .qtype = try r.takeEnumNonexhaustive(Type, .big),
+                    .class = try r.takeEnumNonexhaustive(Class, .big),
+                } };
+            } else {
+                _ = try Label.getName(name_buf, &r);
+                _ = try r.discard(.limited(4));
+            }
         } else if (payload_idx >= msg.header.qdcount) {
-            const name = try Label.getName(name_buf, msg.bytes, &idx);
-            const rdlen: u16 = @byteSwap(@as(u16, @bitCast(msg.bytes[idx..][8..10].*)));
-            if (rdlen > msg.bytes.len - idx) return error.InvalidPacket;
+            const name = try Label.getName(name_buf, &r);
+            const rtype: Type = try r.takeEnumNonexhaustive(Type, .big);
+            const class: Class = try r.takeEnumNonexhaustive(Class, .big);
+            const ttl: TTL = .seconds(try r.takeInt(i32, .big));
+            const rdlen: u16 = try r.takeInt(u16, .big);
+            if (rdlen > r.bufferedLen()) return error.InvalidPacket;
             if (payload_idx != index) {
-                idx += 10 + rdlen;
+                _ = try r.discard(.limited(rdlen));
                 continue;
             }
-            const rtype: Type = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][0..2].*))));
-
-            const class: Class = @enumFromInt(@byteSwap(@as(u16, @bitCast(msg.bytes[idx..][2..4].*))));
-            const ttl: TTL = .seconds(@byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))));
-
-            idx += 10;
             const rdata: Resource.RData = switch (rtype) {
-                .a => .{ .a = msg.bytes[idx..][0..4].* },
-                .aaaa => .{ .aaaa = msg.bytes[idx..][0..16].* },
-                .cname => .{ .cname = msg.bytes[idx..][0..rdlen] },
+                .a => .{ .a = (try r.takeArray(4)).* },
+                .aaaa => .{ .aaaa = (try r.takeArray(16)).* },
+                .cname => .{ .cname = try r.take(rdlen) },
                 .soa => .{ .soa = .{
-                    .mname = try Label.getName(name_buf[128..], msg.bytes, &idx),
-                    .rname = try Label.getName(name_buf[256..], msg.bytes, &idx),
-                    .serial = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][0..4].*))),
-                    .refresh = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][4..8].*))),
-                    .retry = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][8..12].*))),
-                    .expire = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][12..16].*))),
-                    .minimum = @byteSwap(@as(u32, @bitCast(msg.bytes[idx..][16..20].*))),
+                    .mname = try Label.getName(name_buf[128..], &r),
+                    .rname = try Label.getName(name_buf[256..], &r),
+                    .serial = try r.takeInt(u32, .big),
+                    .refresh = try r.takeInt(u32, .big),
+                    .retry = try r.takeInt(u32, .big),
+                    .expire = try r.takeInt(u32, .big),
+                    .minimum = try r.takeInt(u32, .big),
                 } },
-                .EDNS => .{ .EDNS = msg.bytes[idx..][0..rdlen] },
+                .EDNS => .{ .EDNS = try r.take(rdlen) },
                 .https => .{ ._null = {} },
                 else => |err| {
                     log.err("not implemented {}", .{err});
@@ -354,7 +355,7 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 },
             };
 
-            const r: Resource = .{
+            const rce: Resource = .{
                 .name = name,
                 .rtype = rtype,
                 .class = class,
@@ -362,7 +363,7 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 .data = rdata,
             };
 
-            return .{ .answer = r };
+            return .{ .answer = rce };
         }
     } else return error.InvalidIndex;
 }
@@ -500,13 +501,13 @@ test Message {
     };
 
     var msg1 = try Message.fromBytes(&source_bytes);
-    var w_b: [source_bytes.len]u8 = undefined;
     try msg1.parse(std.testing.allocator);
     defer msg1.questions.?.deinit(std.testing.allocator);
     defer msg1.answers.?.deinit(std.testing.allocator);
     defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
     defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
 
+    var w_b: [source_bytes.len]u8 = undefined;
     var fixed: Writer = .fixed(&w_b);
     _ = try msg1.write(&fixed);
 
@@ -587,13 +588,13 @@ test "arcount > 0" {
     };
 
     var msg1 = try Message.fromBytes(&source_bytes);
-    var w_b: [source_bytes.len]u8 = undefined;
     try msg1.parse(std.testing.allocator);
     defer msg1.questions.?.deinit(std.testing.allocator);
     defer msg1.answers.?.deinit(std.testing.allocator);
     defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
     defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
 
+    var w_b: [source_bytes.len]u8 = undefined;
     var fixed: Writer = .fixed(&w_b);
     _ = try msg1.write(&fixed);
 
@@ -604,5 +605,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const log = std.log;
-const Writer = std.Io.Writer;
+const Writer = Io.Writer;
+const Reader = Io.Reader;
 const ArrayList = std.ArrayList;
