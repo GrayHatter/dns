@@ -136,21 +136,25 @@ fn hitUpstream(
     io: Io,
 ) !DNS.Message {
     const peer, const upstream = upstreams.get();
-    log.warn("    hitting upstream {f}", .{peer.addr});
     var w = upstream.writer(io, &.{});
-    try w.interface.writeAll(net_msg.data);
-    var reader = upstream.reader(io, relay_buf);
-    reader.interface.fillMore() catch @panic("fixme");
-    const recv_msg = reader.interface.buffered();
+    var r = upstream.reader(io, relay_buf);
+    log.warn("    hitting upstream {f}", .{peer.addr});
+    var pollfds: [1]linux.pollfd = .{.{ .fd = upstream.socket.handle, .events = std.math.maxInt(i16), .revents = 0 }};
+    var timeout: linux.timespec = .{ .sec = 0, .nsec = 65 * ns_per_ms };
+    var recv_msg: []u8 = &.{};
+    while (true) : (pollfds[0].revents = 0) {
+        try w.interface.writeAll(net_msg.data);
+        try w.interface.flush();
+        const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
+        if (ready == 0) continue;
+        r.interface.fillMore() catch @panic("fixme");
+        recv_msg = r.interface.buffered();
+        if (std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2]))
+            break;
+        r.interface.tossBuffered();
+    }
     log.info("bounce received {}", .{recv_msg.len});
     log.debug("bounce data {any}", .{recv_msg});
-    if (!std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
-        // drop 2 messages or 2 timeouts
-        //_ = upstream.recv(&relay_buf) catch 0;
-        //_ = upstream.recv(&relay_buf) catch 0;
-        log.err("out of order messages with upstream {any} resetting", .{upstream.socket.address});
-        return error.OutOfOrderMessages;
-    }
 
     for (blocked_ips) |banned| {
         if (eql(u8, recv_msg[recv_msg.len - 4 .. recv_msg.len], &banned)) {
@@ -186,16 +190,13 @@ fn core(
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
-            log.err("query:  [ {s} ]", .{q.name});
-
+            log.err("query {}:  [ {s} ]", .{ q.qtype, q.name });
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                     if (!goptr.found_existing) {
                         goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                        goptr.value_ptr.* = .{
-                            .name = try cache.store(domain.zone),
-                        };
+                        goptr.value_ptr.* = .{ .name = try cache.store(domain.zone) };
                     }
                     goptr.value_ptr.hits += 1;
                     break :f goptr.value_ptr;
@@ -426,29 +427,24 @@ pub fn main() !void {
             .behavior = .{ .nxdomain = 300 },
         });
     }
-    try upstreams.init(io);
-
-    var pollfds: [2]linux.pollfd = undefined;
-    const sigfd: Io.File = .{ .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))) };
-    if (sigfd.handle < 0) @panic("signal fd failed");
-
-    //var f_b: [20]Future = undefined;
-    //var flist: ArrayList(Future) = .initBuffer(&f_b);
-
     var q_b: [20]Message = undefined;
     var queue: Queue(Message) = .init(&q_b);
 
     var consume = io.async(answer, .{ &queue, a, io });
     defer _ = consume.cancel(io);
 
+    try upstreams.init(io);
+    const sigfd: Io.File = .{ .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))) };
+    if (sigfd.handle < 0) @panic("signal fd failed");
+    var pollfds: [2]linux.pollfd = .{
+        .{ .fd = sigfd.handle, .events = std.math.maxInt(i16), .revents = 0 },
+        .{ .fd = downstream.handle, .events = std.math.maxInt(i16), .revents = 0 },
+    };
+    var timeout: linux.timespec = .{ .sec = 0, .nsec = 250 * ns_per_ms };
     while (true) : ({
-        pollfds = .{
-            .{ .fd = sigfd.handle, .events = std.math.maxInt(i16), .revents = 0 },
-            .{ .fd = downstream.handle, .events = std.math.maxInt(i16), .revents = 0 },
-        };
+        for (&pollfds) |*fd| fd.revents = 0;
     }) {
-        var timeout: linux.timespec = .{ .sec = 0, .nsec = 100 * ns_per_ms };
-        const ready = linux.ppoll(&pollfds, 2, &timeout, &sigset);
+        const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
 
         if (ready < 0) {
             log.warn("signaled, cleaning up", .{});
