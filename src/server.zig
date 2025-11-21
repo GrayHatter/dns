@@ -61,7 +61,7 @@ fn sendCachedAnswer(
     const now: Io.Timestamp = try Io.Clock.real.now(io);
     const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
     zone.hits += 1;
-    log.err("    {} hits for [{s}] ({}ms remain)", .{ zone.hits, name, duration.toMilliseconds() });
+    log.err("    {} hits ({}ms remain)", .{ zone.hits, duration.toMilliseconds() });
     var ans_bytes: [512]u8 = undefined;
     switch (zone.behavior) {
         .nxdomain => {
@@ -85,7 +85,7 @@ fn sendCachedAnswer(
             switch (qtype) {
                 .a => {
                     if (c_result.a.items.len == 0) {
-                        log.err("    a request is null {s}", .{domain.zone});
+                        log.err("    a request is null", .{});
                         return false;
                     }
                     for (c_result.a.items) |src| {
@@ -105,7 +105,7 @@ fn sendCachedAnswer(
                 .aaaa => {
                     log.info("cached {s}", .{domain.zone});
                     if (c_result.aaaa.items.len == 0) {
-                        log.err("    aaaa request is null {s}", .{domain.zone});
+                        log.err("    aaaa request is null", .{});
                         return false;
                     }
                     for (c_result.aaaa.items) |src| {
