@@ -169,7 +169,6 @@ fn core(
     a: Allocator,
     io: Io,
 ) !bool {
-    const now: Io.Timestamp = try Io.Clock.real.now(io);
     const msg: DNS.Message = try .fromBytes(net_msg.data);
 
     log.info("incoming packet\n{f}", .{msg.header});
@@ -233,16 +232,25 @@ fn core(
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
+    cacheAnswer(cache, rmsg, a, io) catch |err| {
+        log.err("rdata {any}", .{relay_buf});
+        return err;
+    };
+
+    return false;
+}
+
+fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void {
+    const now: Io.Timestamp = try Io.Clock.real.now(io);
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
     var suggested: DNS.Message.TTL = .@"5min";
 
     var rit = rmsg.iterator();
-    while (rit.next() catch |err| e: {
+    while (rit.next() catch |err| {
         log.err("relayed iter error {}", .{err});
-        log.err("rdata {any}", .{relay_buf});
-        break :e null;
+        return err;
     }) |pay| switch (pay) {
         .question => |q| {
             const domain: Domain = .init(q.name);
@@ -306,7 +314,6 @@ fn core(
             } else |err| return err;
         },
     };
-    return false;
 }
 
 var blocked_ips: []const [4]u8 = &.{};
