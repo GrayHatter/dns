@@ -129,6 +129,39 @@ fn sendCachedAnswer(
     return false;
 }
 
+fn hitUpstream(
+    net_msg: net.IncomingMessage,
+    downstream: net.Socket,
+    relay_buf: *[1024]u8,
+    io: Io,
+) !DNS.Message {
+    const peer, const upstream = upstreams.get();
+    log.warn("    hitting upstream {f}", .{peer.addr});
+    var w = upstream.writer(io, &.{});
+    try w.interface.writeAll(net_msg.data);
+    var reader = upstream.reader(io, relay_buf);
+    reader.interface.fillMore() catch @panic("fixme");
+    const recv_msg = reader.interface.buffered();
+    log.info("bounce received {}", .{recv_msg.len});
+    log.debug("bounce data {any}", .{recv_msg});
+    if (!std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
+        // drop 2 messages or 2 timeouts
+        //_ = upstream.recv(&relay_buf) catch 0;
+        //_ = upstream.recv(&relay_buf) catch 0;
+        log.err("out of order messages with upstream {any} resetting", .{upstream.socket.address});
+        return error.OutOfOrderMessages;
+    }
+
+    for (blocked_ips) |banned| {
+        if (eql(u8, recv_msg[recv_msg.len - 4 .. recv_msg.len], &banned)) {
+            @memset(recv_msg[recv_msg.len - 4 .. recv_msg.len], 0);
+        }
+    }
+    //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
+    try downstream.send(io, &net_msg.from, recv_msg);
+    return try .fromBytes(recv_msg);
+}
+
 fn core(
     cache: *ZoneCache,
     net_msg: net.IncomingMessage,
@@ -195,35 +228,8 @@ fn core(
         .answer => break,
     };
 
-    const peer, const upstream = upstreams.get();
-    log.warn("    hitting upstream {f}", .{peer.addr});
-    var w = upstream.writer(io, &.{});
-    try w.interface.writeAll(net_msg.data);
     var relay_buf: [1024]u8 = undefined;
-    var reader = upstream.reader(io, &relay_buf);
-    reader.interface.fillMore() catch @panic("fixme");
-    const recv_msg = reader.interface.buffered();
-    log.info("bounce received {}", .{recv_msg.len});
-    log.debug("bounce data {any}", .{recv_msg});
-    if (!std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
-        // drop 2 messages or 2 timeouts
-        //_ = upstream.recv(&relay_buf) catch 0;
-        //_ = upstream.recv(&relay_buf) catch 0;
-        log.err("out of order messages with upstream {any} resetting", .{upstream.socket.address});
-        return error.OutOfOrderMessages;
-    }
-
-    for (blocked_ips) |banned| {
-        if (eql(u8, recv_msg[recv_msg.len - 4 .. recv_msg.len], &banned)) {
-            @memset(recv_msg[recv_msg.len - 4 .. recv_msg.len], 0);
-        }
-    }
-
-    //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
-
-    try downstream.send(io, &net_msg.from, recv_msg);
-
-    const rmsg: DNS.Message = try .fromBytes(recv_msg);
+    const rmsg: DNS.Message = try hitUpstream(net_msg, downstream, &relay_buf, io);
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
@@ -235,7 +241,7 @@ fn core(
     var rit = rmsg.iterator();
     while (rit.next() catch |err| e: {
         log.err("relayed iter error {}", .{err});
-        log.err("rdata {any}", .{recv_msg});
+        log.err("rdata {any}", .{relay_buf});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
