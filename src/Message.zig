@@ -427,13 +427,13 @@ pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
         if (answers[0].ips.len == 1) {
             for (answers, pointers) |ans, p| {
                 for (ans.ips) |ip| {
-                    const r: Resource = .init(ans.fqdn, ip, .@"5min");
+                    const r: Resource = .init(ans.fqdn, ip, .seconds(30));
                     idx += try r.write(&w, p);
                 }
             }
         } else {
             for (answers[0].ips) |ip| {
-                const r: Resource = .init(answers[0].fqdn, ip, .@"5min");
+                const r: Resource = .init(answers[0].fqdn, ip, .seconds(30));
                 idx += try r.write(&w, pointers[0]);
             }
         }
@@ -446,7 +446,7 @@ pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
 }
 
 pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
-    return try answer(id, &[1]AnswerData{.{ .fqdn = fqdn, .ips = &[0]Resource.RData{} }}, bytes);
+    return try answer(id, &[1]AnswerData{.{ .fqdn = fqdn, .ips = &.{} }}, bytes);
 }
 
 pub fn write(m: Message, w: *Writer) !usize {

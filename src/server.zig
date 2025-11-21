@@ -240,7 +240,6 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
-    var suggested: DNS.Message.TTL = .@"5min";
 
     var rit = rmsg.iterator();
     while (rit.next() catch |err| {
@@ -270,7 +269,6 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
             log.info("{f}", .{q});
         },
         .answer => |r| {
-            suggested.duration.nanoseconds = @min(r.ttl.duration.nanoseconds, suggested.duration.nanoseconds);
             log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r question = \n{f}", .{r});
@@ -291,7 +289,12 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                             zone.behavior.cached.a.clearRetainingCapacity();
                             zone.behavior.cached.aaaa.clearRetainingCapacity();
                         }
-                        zone.behavior.cached.expires = now.addDuration(suggested.duration);
+                        zone.behavior.cached.expires = now.addDuration(.{
+                            .nanoseconds = @max(
+                                r.ttl.duration.nanoseconds,
+                                DNS.Message.TTL.seconds(90).duration.nanoseconds,
+                            ),
+                        });
                     },
                     .nxdomain => {},
                 }
