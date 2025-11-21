@@ -1,11 +1,48 @@
-var blocked_ips: []const [4]u8 = &[0][4]u8{};
+const Upstream = struct {
+    conns: [4]net.Stream,
+    next: u8 = 0,
 
-const upstreams: [4]DaemonPeer = .{
-    .cloudflare_0,
-    .cloudflare_1,
-    .google_0,
-    .google_1,
+    const Peer = struct {
+        addr: Io.net.IpAddress,
+
+        pub const cloudflare_0: Peer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 1, 1, 1 }, .port = 53 } } };
+        pub const cloudflare_1: Peer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 0, 0, 1 }, .port = 53 } } };
+        pub const google_0: Peer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 8, 8 }, .port = 53 } } };
+        pub const google_1: Peer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 4, 4 }, .port = 53 } } };
+    };
+    const peers: [4]Peer = .{
+        .cloudflare_0,
+        .cloudflare_1,
+        .google_0,
+        .google_1,
+    };
+
+    pub fn init(up: *Upstream, io: Io) !void {
+        for (&up.conns, peers) |*stream, peer| {
+            stream.* = try peer.addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
+        }
+    }
+
+    pub fn get(up: *Upstream) struct { Peer, net.Stream } {
+        var next = @atomicLoad(u8, &up.next, .unordered);
+        while (true) {
+            if (@cmpxchgWeak(
+                u8,
+                &up.next,
+                next,
+                @intCast((next + 1) % up.conns.len),
+                .monotonic,
+                .monotonic,
+            )) |new| {
+                next = new;
+            } else {
+                return .{ peers[next], up.conns[next] };
+            }
+        }
+    }
 };
+
+var upstreams: Upstream = .{ .conns = undefined };
 
 pub const std_options: std.Options = .{
     .log_level = .debug,
@@ -66,8 +103,9 @@ fn sendCachedAnswer(
     var res_buff: [20]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
     const now: Io.Timestamp = try Io.Clock.real.now(io);
+    const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
     zone.hits += 1;
-    log.err("    {} hits for [{s}]", .{ zone.hits, name });
+    log.err("    {} hits for [{s}] ({}ms remain)", .{ zone.hits, name, duration.toMilliseconds() });
     var ans_bytes: [512]u8 = undefined;
     switch (zone.behavior) {
         .nxdomain => {
@@ -91,7 +129,7 @@ fn sendCachedAnswer(
             switch (qtype) {
                 .a => {
                     if (c_result.a.items.len == 0) {
-                        log.err("a request is null {s}", .{domain.zone});
+                        log.err("    a request is null {s}", .{domain.zone});
                         return false;
                     }
                     for (c_result.a.items) |src| {
@@ -111,7 +149,7 @@ fn sendCachedAnswer(
                 .aaaa => {
                     log.info("cached {s}", .{domain.zone});
                     if (c_result.aaaa.items.len == 0) {
-                        log.err("aaaa request is null {s}", .{domain.zone});
+                        log.err("    aaaa request is null {s}", .{domain.zone});
                         return false;
                     }
                     for (c_result.aaaa.items) |src| {
@@ -137,28 +175,26 @@ fn sendCachedAnswer(
 
 fn core(
     cache: *ZoneCache,
-    in_msg: []const u8,
+    net_msg: net.IncomingMessage,
     downstream: net.Socket,
-    addr: net.IpAddress,
-    upstream: net.Stream,
     a: Allocator,
     io: Io,
 ) !bool {
     const now: Io.Timestamp = try Io.Clock.real.now(io);
-    const msg: DNS.Message = try .fromBytes(in_msg);
+    const msg: DNS.Message = try .fromBytes(net_msg.data);
 
     log.info("incoming packet\n{f}", .{msg.header});
 
     if (msg.header.qdcount >= 16) {
         log.err("dropping invalid msg", .{});
-        log.debug("that message {any}", .{in_msg});
+        log.debug("that message {any}", .{net_msg.data});
         return true;
     }
 
     var iter = msg.iterator();
     while (iter.next() catch |err| e: {
         log.err("question iter error {}", .{err});
-        log.err("qdata {any}", .{in_msg});
+        log.err("qdata {any}", .{net_msg.data});
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
@@ -191,7 +227,7 @@ fn core(
                     &domain,
                     zone,
                     downstream,
-                    addr,
+                    net_msg.from,
                     io,
                 )) |sent| {
                     if (sent) return true;
@@ -203,17 +239,17 @@ fn core(
         .answer => break,
     };
 
-    log.debug("hitting upstream {any}", .{upstream.socket.address});
-    //log.info("bounce", .{});
+    const peer, const upstream = upstreams.get();
+    log.warn("    hitting upstream {f}", .{peer.addr});
     var w = upstream.writer(io, &.{});
-    try w.interface.writeAll(in_msg);
+    try w.interface.writeAll(net_msg.data);
     var relay_buf: [1024]u8 = undefined;
     var reader = upstream.reader(io, &relay_buf);
     reader.interface.fillMore() catch @panic("fixme");
     const recv_msg = reader.interface.buffered();
     log.info("bounce received {}", .{recv_msg.len});
     log.debug("bounce data {any}", .{recv_msg});
-    if (!std.mem.eql(u8, relay_buf[0..2], in_msg[0..2])) {
+    if (!std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
         // drop 2 messages or 2 timeouts
         //_ = upstream.recv(&relay_buf) catch 0;
         //_ = upstream.recv(&relay_buf) catch 0;
@@ -229,7 +265,7 @@ fn core(
 
     //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
 
-    try downstream.send(io, &addr, recv_msg);
+    try downstream.send(io, &net_msg.from, recv_msg);
 
     const rmsg: DNS.Message = try .fromBytes(recv_msg);
     if (rmsg.header.qdcount != 1) return false;
@@ -311,24 +347,9 @@ fn core(
     return false;
 }
 
-fn managedCore(
-    cache: *ZoneCache,
-    in_msg: []const u8,
-    downstream: net.Socket,
-    addr: net.IpAddress,
-    upstream: net.Stream,
-    a: Allocator,
-    io: Io,
-) void {
-    core(cache, in_msg, downstream, addr, upstream, a, io) catch |err| switch (err) {
-        error.WouldBlock => return,
-        error.OutOfOrderMessages => return,
-        else => {
-            log.err("core error: {}", .{err});
-            @panic("unreachable");
-        },
-    };
-}
+var blocked_ips: []const [4]u8 = &.{};
+var downstream_pool: []?MsgPtr = &.{};
+const MsgPtr = [1024]u8;
 
 pub fn main() !void {
     const a = std.heap.smp_allocator;
@@ -336,9 +357,13 @@ pub fn main() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var blocks: std.ArrayListUnmanaged([]const u8) = .{};
-    var blocked_ips_: std.ArrayListUnmanaged([4]u8) = .{};
-    var blocked_domains: std.ArrayListUnmanaged([]const u8) = .{};
+    downstream_pool = try a.alloc(?MsgPtr, 20);
+    defer a.free(downstream_pool);
+    for (downstream_pool) |*p| p.* = null;
+
+    var blocks: ArrayList([]const u8) = .{};
+    var blocked_ips_: ArrayList([4]u8) = .{};
+    var blocked_domains: ArrayList([]const u8) = .{};
 
     var argv = std.process.args();
     const arg0 = argv.next().?;
@@ -369,10 +394,7 @@ pub fn main() !void {
 
     blocked_ips = blocked_ips_.items;
 
-    const host: net.IpAddress = .{ .ip4 = .{
-        .bytes = .{ 0, 0, 0, 0 },
-        .port = 53,
-    } };
+    const host: net.IpAddress = .{ .ip4 = .{ .bytes = .{ 0, 0, 0, 0 }, .port = 53 } };
     const downstream: net.Socket = try host.bind(io, .{ .mode = .dgram, .protocol = .udp });
 
     // nobody on my machine
@@ -435,47 +457,108 @@ pub fn main() !void {
             .behavior = .{ .nxdomain = 300 },
         });
     }
+    try upstreams.init(io);
 
-    var upconns: [4]net.Stream = undefined;
-    for (&upconns, upstreams) |*dst, ip| {
-        dst.* = try ip.addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
-    }
-    var up_idx: u2 = 0;
+    var pollfds: [2]linux.pollfd = undefined;
+    const sigfd: Io.File = .{ .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))) };
+    if (sigfd.handle < 0) @panic("signal fd failed");
 
-    var tpool: std.Thread.Pool = undefined;
-    try tpool.init(.{ .allocator = a, .n_jobs = 4 });
+    //var f_b: [20]Future = undefined;
+    //var flist: ArrayList(Future) = .initBuffer(&f_b);
 
-    var timer: std.time.Timer = try .start();
-    while (true) {
-        defer up_idx +%= 1;
-        var buffer: [1024]u8 = undefined;
-        const msg = try downstream.receive(io, &buffer);
+    var q_b: [20]Message = undefined;
+    var queue: Queue(Message) = .init(&q_b);
 
-        timer.reset();
-        log.info("received {}", .{msg.data.len});
-        log.debug("data {any}", .{msg.data});
-        log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
-        //const current_time = std.time.timestamp();
-        //try tpool.spawn(managedCore, .{ a, &cache, buffer[0..icnt], downstream, addr, upconns[up_idx] });
+    var consume = io.async(answer, .{ &queue, a, io });
+    defer _ = consume.cancel(io);
 
-        const cached = core(&cache, msg.data, downstream, msg.from, upconns[up_idx], a, io) catch |err| switch (err) {
-            //error.WouldBlock => continue,
-            //error.OutOfOrderMessages => continue,
-            else => {
-                log.err("core error: {}", .{err});
-                return err;
-            },
+    while (true) : ({
+        pollfds = .{
+            .{ .fd = sigfd.handle, .events = std.math.maxInt(i16), .revents = 0 },
+            .{ .fd = downstream.handle, .events = std.math.maxInt(i16), .revents = 0 },
         };
-        if (cached) {
-            log.err("    **    cached response {d}us", .{timer.lap() / 1000});
-        } else {
-            log.err("    ->    {any} responded {d}us", .{ upconns[up_idx], timer.lap() / 1000 });
+    }) {
+        var timeout: linux.timespec = .{ .sec = 0, .nsec = 100 * ns_per_ms };
+        const ready = linux.ppoll(&pollfds, 2, &timeout, &sigset);
+
+        if (ready < 0) {
+            log.warn("signaled, cleaning up", .{});
+        } else if (ready == 0) continue;
+
+        if (pollfds[0].revents != 0) {
+            log.err("signal", .{});
+            var r_b: [@sizeOf(linux.signalfd_siginfo)]u8 = undefined;
+            var r = sigfd.reader(io, &r_b);
+            const siginfo: linux.signalfd_siginfo = r.interface.takeStruct(linux.signalfd_siginfo, sys_endian) catch unreachable;
+            std.debug.print("siginfo {}\n\n\n", .{siginfo});
+            break;
+        }
+        if (pollfds[1].revents != 0) {
+            try accept(&cache, downstream, io, &queue);
+            continue;
         }
     }
 
     log.err("done", .{});
 }
 
+const sigset: linux.sigset_t = defaultSigSet();
+fn defaultSigSet() linux.sigset_t {
+    var ss: linux.sigset_t = linux.sigemptyset();
+    linux.sigaddset(&ss, .INT);
+    linux.sigaddset(&ss, .HUP);
+    linux.sigaddset(&ss, .QUIT);
+    return ss;
+}
+
+const Message = struct {
+    msg: net.IncomingMessage,
+    ptr: *?MsgPtr,
+    cache: *ZoneCache,
+    downstream: net.Socket,
+    timer: std.time.Timer,
+};
+
+fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
+    while (q.getOne(io)) |msg_| {
+        var msg = msg_;
+        if (core(msg.cache, msg.msg, msg.downstream, a, io) catch @panic("bah!")) {
+            log.err("    **    cached response {d}us", .{msg.timer.lap() / 1000});
+        } else {
+            log.err("    ->    upstream responded {d}us", .{msg.timer.lap() / 1000});
+        }
+        msg.ptr.* = null;
+    } else |_| {}
+}
+
+fn accept(cache: *ZoneCache, downstream: net.Socket, io: Io, q: *Queue(Message)) !void {
+    var mp: *?MsgPtr = undefined;
+    for (downstream_pool) |*pool| {
+        if (pool.* == null) {
+            pool.* = undefined;
+            mp = pool;
+            break;
+        } else continue;
+    } else {
+        log.err("buffer full", .{});
+        return;
+    }
+
+    const msg = try downstream.receive(io, &mp.*.?);
+    log.info("received {}", .{msg.data.len});
+    log.debug("data {any}", .{msg.data});
+    log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
+
+    try q.putOne(io, .{
+        .msg = msg,
+        .ptr = mp,
+        .cache = cache,
+        .downstream = downstream,
+        .timer = try .start(),
+    });
+}
+
+const Queue = Io.Queue;
 const Behavior = ZoneCache.Behavior;
 const ZoneCache = @import("Cache.zig");
 const Zone = ZoneCache.Zone;
@@ -499,20 +582,11 @@ pub const Domain = struct {
     }
 };
 
-const DaemonPeer = struct {
-    addr: Io.net.IpAddress,
-
-    pub const cloudflare_0: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 1, 1, 1 }, .port = 53 } } };
-    pub const cloudflare_1: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 1, 0, 0, 1 }, .port = 53 } } };
-    pub const google_0: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 8, 8 }, .port = 53 } } };
-    pub const google_1: DaemonPeer = .{ .addr = .{ .ip4 = .{ .bytes = .{ 8, 8, 4, 4 }, .port = 53 } } };
-};
-
 const RecordAddress = union(enum) {
     a: [4]u8,
     aaaa: [16]u8,
 
-    pub fn format(addr: RecordAddress, w: *std.Io.Writer) !void {
+    pub fn format(addr: RecordAddress, w: *Writer) !void {
         switch (addr) {
             .a => |a| try w.print("{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }),
             .aaaa => |aaaa| try w.print("{x}", .{aaaa}),
@@ -656,8 +730,10 @@ const DNS = @import("dns.zig");
 const RData = DNS.Message.Resource.RData;
 
 const std = @import("std");
+const sys_endian = @import("builtin").target.cpu.arch.endian();
 const Io = std.Io;
 const Reader = Io.Reader;
+const Writer = Io.Writer;
 const net = Io.net;
 const log = std.log;
 const Allocator = std.mem.Allocator;
@@ -667,3 +743,5 @@ const trim = std.mem.trim;
 const indexOfAny = std.mem.indexOfAny;
 const indexOfScalar = std.mem.indexOfScalar;
 const tokenizeAny = std.mem.tokenizeAny;
+const linux = std.os.linux;
+const ns_per_ms = 1000 * 1000;
