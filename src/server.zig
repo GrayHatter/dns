@@ -46,10 +46,8 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
 }
 
 fn sendCachedAnswer(
-    qid: u16,
-    name: []const u8,
-    qdcount: u16,
-    qtype: DNS.Message.Type,
+    mheader: DNS.Message.Header,
+    q: DNS.Message.Question,
     domain: *const Domain,
     zone: *Zone,
     downstream: net.Socket,
@@ -65,13 +63,13 @@ fn sendCachedAnswer(
     var ans_bytes: [512]u8 = undefined;
     switch (zone.behavior) {
         .nxdomain => {
-            if (qdcount == 1) {
-                const ans: DNS.Message = try .answerDrop(qid, name, &ans_bytes);
+            if (mheader.qdcount == 1) {
+                const ans: DNS.Message = try .answerDrop(mheader.id, q.name, &ans_bytes);
                 try downstream.send(io, &addr, ans.bytes);
-                log.err("dropping request for {s}", .{name});
+                log.err("dropping request for {s}", .{q.name});
                 return true;
             }
-            log.err("unable to drop complex record for {s}", .{name});
+            log.err("unable to drop complex record for {s}", .{q.name});
             return false;
         },
         .cached => |c_result| {
@@ -82,7 +80,7 @@ fn sendCachedAnswer(
                 );
                 return false;
             }
-            switch (qtype) {
+            switch (q.qtype) {
                 .a => {
                     if (c_result.a.items.len == 0) {
                         log.err("    a request is null", .{});
@@ -92,8 +90,8 @@ fn sendCachedAnswer(
                         try addr_list.appendBounded(.{ .a = src.bytes });
                     }
                     const ans: DNS.Message = try .answer(
-                        qid,
-                        &[1]DNS.Message.AnswerData{.{ .fqdn = name, .ips = addr_list.items }},
+                        mheader.id,
+                        &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
                         &ans_bytes,
                     );
                     log.info("cached answer {any}", .{ans.bytes});
@@ -112,8 +110,8 @@ fn sendCachedAnswer(
                         try addr_list.appendBounded(.{ .aaaa = src.bytes });
                     }
                     const ans: DNS.Message = try .answer(
-                        qid,
-                        &[1]DNS.Message.AnswerData{.{ .fqdn = name, .ips = addr_list.items }},
+                        mheader.id,
+                        &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
                         &ans_bytes,
                     );
                     try downstream.send(io, &addr, ans.bytes);
@@ -139,7 +137,11 @@ fn hitUpstream(
     var w = upstream.writer(io, &.{});
     var r = upstream.reader(io, relay_buf);
     log.warn("    hitting upstream {f}", .{peer.addr});
-    var pollfds: [1]linux.pollfd = .{.{ .fd = upstream.socket.handle, .events = std.math.maxInt(i16), .revents = 0 }};
+    var pollfds: [1]linux.pollfd = .{.{
+        .fd = upstream.socket.handle,
+        .events = std.math.maxInt(i16),
+        .revents = 0,
+    }};
     var timeout: linux.timespec = .{ .sec = 0, .nsec = 65 * ns_per_ms };
     var recv_msg: []u8 = &.{};
     while (true) : (pollfds[0].revents = 0) {
@@ -196,7 +198,9 @@ fn core(
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                     if (!goptr.found_existing) {
                         goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                        goptr.value_ptr.* = .{ .name = try cache.store(domain.zone) };
+                        goptr.value_ptr.* = .{
+                            .name = try cache.store(domain.zone),
+                        };
                     }
                     goptr.value_ptr.hits += 1;
                     break :f goptr.value_ptr;
@@ -208,17 +212,7 @@ fn core(
 
             const lzone: Zone = .{ .name = try cache.store(domain.zone) };
             if (tld.zones.getKeyPtr(lzone)) |zone| {
-                if (sendCachedAnswer(
-                    msg.header.id,
-                    q.name,
-                    msg.header.qdcount,
-                    q.qtype,
-                    &domain,
-                    zone,
-                    downstream,
-                    net_msg.from,
-                    io,
-                )) |sent| {
+                if (sendCachedAnswer(msg.header, q, &domain, zone, downstream, net_msg.from, io)) |sent| {
                     if (sent) return true;
                 } else |err| return err;
             } else {
