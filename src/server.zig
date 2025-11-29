@@ -144,15 +144,22 @@ fn hitUpstream(
     }};
     var timeout: linux.timespec = .{ .sec = 0, .nsec = 65 * ns_per_ms };
     var recv_msg: []u8 = &.{};
-    while (true) : (pollfds[0].revents = 0) {
+    var attempt: u8 = 0;
+    while (true) : ({
+        pollfds[0].revents = 0;
+        attempt +|= 1;
+    }) {
+        if (attempt > 10)
+            log.warn("    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
         try w.interface.writeAll(net_msg.data);
         try w.interface.flush();
         const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
         if (ready == 0) continue;
         r.interface.fillMore() catch @panic("fixme");
         recv_msg = r.interface.buffered();
-        if (std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2]))
+        if (std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
             break;
+        }
         r.interface.tossBuffered();
     }
     log.info("bounce received {}", .{recv_msg.len});
@@ -315,7 +322,6 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
 }
 
 var blocked_ips: []const [4]u8 = &.{};
-var downstream_pool: []?MsgPtr = &.{};
 const MsgPtr = [1024]u8;
 
 pub fn main() !void {
@@ -323,10 +329,6 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(a);
     defer threaded.deinit();
     const io = threaded.io();
-
-    downstream_pool = try a.alloc(?MsgPtr, 20);
-    defer a.free(downstream_pool);
-    for (downstream_pool) |*p| p.* = null;
 
     var blocks: ArrayList([]const u8) = .{};
     var blocked_ips_: ArrayList([4]u8) = .{};
@@ -456,7 +458,7 @@ pub fn main() !void {
             break;
         }
         if (pollfds[1].revents != 0) {
-            try accept(&cache, downstream, io, &queue);
+            try accept(&cache, downstream, a, io, &queue);
             continue;
         }
     }
@@ -475,7 +477,7 @@ fn defaultSigSet() linux.sigset_t {
 
 const Message = struct {
     msg: net.IncomingMessage,
-    ptr: *?MsgPtr,
+    ptr: *MsgPtr,
     cache: *ZoneCache,
     downstream: net.Socket,
     timer: std.time.Timer,
@@ -483,30 +485,19 @@ const Message = struct {
 
 fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
     while (q.getOne(io)) |msg_| {
+        defer a.destroy(msg_.ptr);
         var msg = msg_;
         if (core(msg.cache, msg.msg, msg.downstream, a, io) catch @panic("bah!")) {
             log.err("    **    cached response {d}us", .{msg.timer.lap() / 1000});
         } else {
             log.err("    ->    upstream responded {d}us", .{msg.timer.lap() / 1000});
         }
-        msg.ptr.* = null;
     } else |_| {}
 }
 
-fn accept(cache: *ZoneCache, downstream: net.Socket, io: Io, q: *Queue(Message)) !void {
-    var mp: *?MsgPtr = undefined;
-    for (downstream_pool) |*pool| {
-        if (pool.* == null) {
-            pool.* = undefined;
-            mp = pool;
-            break;
-        } else continue;
-    } else {
-        log.err("buffer full", .{});
-        return;
-    }
-
-    const msg = try downstream.receive(io, &mp.*.?);
+fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Queue(Message)) !void {
+    const mp: *MsgPtr = try a.create(MsgPtr);
+    const msg = try downstream.receive(io, mp);
     log.info("received {}", .{msg.data.len});
     log.debug("data {any}", .{msg.data});
     log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
