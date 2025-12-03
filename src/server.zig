@@ -54,7 +54,8 @@ fn sendCachedAnswer(
     addr: net.IpAddress,
     io: Io,
 ) !bool {
-    var res_buff: [20]RData = undefined;
+    // 40 seems large here, but I've seen 20 exhaust the buffer
+    var res_buff: [40]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
     const now: Io.Timestamp = try Io.Clock.real.now(io);
     const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
@@ -87,7 +88,11 @@ fn sendCachedAnswer(
                         return false;
                     }
                     for (c_result.a.items) |src| {
-                        try addr_list.appendBounded(.{ .a = src.bytes });
+                        addr_list.appendBounded(.{ .a = src.bytes }) catch |err| {
+                            log.err("address list exhausted", .{});
+                            log.err("cresult\n{}", .{c_result});
+                            return err;
+                        };
                     }
                     const ans: DNS.Message = try .answer(
                         mheader.id,
@@ -200,6 +205,8 @@ fn core(
         break :e null;
     }) |pay| switch (pay) {
         .question => |q| {
+            try ZoneCache.mutex.lock(io);
+            defer ZoneCache.mutex.unlock(io);
             log.err("query {}:  [ {s} ]", .{ q.qtype, q.name });
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
