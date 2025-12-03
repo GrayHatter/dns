@@ -429,8 +429,14 @@ pub fn main() !void {
     var q_b: [20]Message = undefined;
     var queue: Queue(Message) = .init(&q_b);
 
-    var consume = io.async(answer, .{ &queue, a, io });
-    defer _ = consume.cancel(io);
+    var consume0 = io.async(answer, .{ &queue, a, io });
+    defer _ = consume0.cancel(io);
+    var consume1 = io.async(answer, .{ &queue, a, io });
+    defer _ = consume1.cancel(io);
+    var consume2 = io.async(answer, .{ &queue, a, io });
+    defer _ = consume2.cancel(io);
+    var consume3 = io.async(answer, .{ &queue, a, io });
+    defer _ = consume3.cancel(io);
 
     try upstreams.init(io);
     const sigfd: Io.File = .{ .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))) };
