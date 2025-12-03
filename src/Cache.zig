@@ -1,4 +1,5 @@
 const ZoneCache = @This();
+pub var mutex: std.Io.Mutex = .init;
 
 alloc: Allocator,
 tld: std.StringHashMapUnmanaged(Zone) = .{},

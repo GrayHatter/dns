@@ -74,7 +74,7 @@ fn sendCachedAnswer(
         },
         .cached => |c_result| {
             if (c_result.expires.nanoseconds < now.nanoseconds) {
-                log.debug(
+                log.warn(
                     "cached {s} ttl expired {} ({})",
                     .{ domain.zone, now.toSeconds() - c_result.expires.toSeconds(), c_result.expires },
                 );
@@ -249,6 +249,9 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
 
+    try ZoneCache.mutex.lock(io);
+    defer ZoneCache.mutex.unlock(io);
+
     var rit = rmsg.iterator();
     while (rit.next() catch |err| {
         log.err("relayed iter error {}", .{err});
@@ -260,9 +263,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                     if (!goptr.found_existing) {
                         goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                        goptr.value_ptr.* = .{
-                            .name = try cache.store(domain.zone),
-                        };
+                        goptr.value_ptr.* = .{ .name = try cache.store(domain.zone) };
                     }
                     goptr.value_ptr.hits += 1;
                     break :f goptr.value_ptr;
@@ -280,17 +281,12 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
             log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
             log.debug("r answer = \n{f}", .{r});
+
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
-                if (!gop.found_existing) {
-                    zone.behavior = .new;
-                }
+                if (!gop.found_existing) zone.behavior = .new;
                 switch (zone.behavior) {
-                    .new => {
-                        zone.behavior = .{
-                            .cached = .{ .expires = now, .a = .{}, .aaaa = .{} },
-                        };
-                    },
+                    .new => zone.behavior = .{ .cached = .{ .expires = now, .a = .{}, .aaaa = .{} } },
                     .cached => {
                         if (zone.behavior.cached.expires.nanoseconds < now.nanoseconds) {
                             zone.behavior.cached.a.clearRetainingCapacity();
