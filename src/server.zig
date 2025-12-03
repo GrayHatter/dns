@@ -339,9 +339,7 @@ pub fn main() !void {
             const ip_str = argv.next() orelse usage(arg0, "<ip address> missing for --drop-ip");
             var ip: [4]u8 = undefined;
             var itr = std.mem.splitScalar(u8, ip_str, '.');
-            for (&ip) |*oct| {
-                oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
-            }
+            for (&ip) |*oct| oct.* = std.fmt.parseInt(u8, itr.next() orelse "0", 10) catch 0;
             try blocked_ips_.append(a, ip);
         } else if (eql(u8, arg, "--drop-domain")) {
             const domain_str = argv.next() orelse usage(arg0, "<fqdn> missing for --drop-domain");
@@ -370,22 +368,9 @@ pub fn main() !void {
     }
 
     log.err("started", .{});
-
     var cache: ZoneCache = .{ .alloc = a };
-
-    const preload_tlds = [_][]const u8{
-        "com",
-        "net",
-        "org",
-        "tv",
-        "ht",
-        "rs",
-    };
-    for (preload_tlds) |ptld| {
-        try cache.tld.put(a, ptld, .{
-            .name = try cache.store(ptld),
-        });
-    }
+    const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht", "rs" };
+    for (preload_tlds) |ptld| try cache.tld.put(a, ptld, .{ .name = try cache.store(ptld) });
 
     var blocked_results: ArrayList(Result) = .{};
     defer blocked_results.clearAndFree(a);
@@ -409,18 +394,11 @@ pub fn main() !void {
         const domain: Domain = .init(dd);
         log.err("tld {s}", .{domain.tld});
         const tldgop = try cache.tld.getOrPut(a, domain.tld);
-        if (!tldgop.found_existing) {
-            tldgop.value_ptr.* = .{
-                .name = try cache.store(domain.tld),
-            };
-        }
+        if (!tldgop.found_existing) tldgop.value_ptr.* = .{ .name = try cache.store(domain.tld) };
         var tld = tldgop.value_ptr;
         log.err("zone {s}", .{domain.zone});
         const str = try cache.store(domain.zone);
-        _ = try tld.zones.getOrPut(a, .{
-            .name = str,
-            .behavior = .{ .nxdomain = 300 },
-        });
+        _ = try tld.zones.getOrPut(a, .{ .name = str, .behavior = .{ .nxdomain = 300 } });
     }
     var q_b: [20]Message = undefined;
     var queue: Queue(Message) = .init(&q_b);
@@ -530,10 +508,7 @@ pub const Domain = struct {
             '.',
         );
 
-        return .{
-            .tld = bit.first(),
-            .zone = bit.rest(),
-        };
+        return .{ .tld = bit.first(), .zone = bit.rest() };
     }
 };
 
