@@ -1,15 +1,15 @@
 var upstreams: Upstream = .{ .conns = undefined };
 
 pub const std_options: std.Options = .{
-    .log_level = .debug,
-    .logFn = logFunc,
+    .log_level = .warn,
+    //.logFn = logFunc,
 };
 
 var log_level_target: log.Level = .warn;
 
 pub fn logFunc(
     comptime message_level: log.Level,
-    comptime _: @Type(.enum_literal),
+    comptime _: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
@@ -94,7 +94,7 @@ fn sendCachedAnswer(
                         &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
                         &ans_bytes,
                     );
-                    log.info("cached answer {any}", .{ans.bytes});
+                    log.debug("cached answer {any}", .{ans.bytes});
                     //std.time.sleep(100_000);
                     try downstream.send(io, &addr, ans.bytes);
                     return true;
@@ -134,7 +134,8 @@ fn hitUpstream(
     io: Io,
 ) !DNS.Message {
     const peer, const upstream = upstreams.get();
-    var w = upstream.writer(io, &.{});
+    var w_b: [512]u8 = undefined;
+    var w = upstream.writer(io, &w_b);
     var r = upstream.reader(io, relay_buf);
     log.warn("    hitting upstream {f}", .{peer.addr});
     var pollfds: [1]linux.pollfd = .{.{
@@ -150,16 +151,16 @@ fn hitUpstream(
         attempt +|= 1;
     }) {
         if (attempt > 10)
-            log.warn("    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
+            log.err("***    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
         try w.interface.writeAll(net_msg.data);
         try w.interface.flush();
         const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
         if (ready == 0) continue;
         r.interface.fillMore() catch @panic("fixme");
         recv_msg = r.interface.buffered();
-        if (std.mem.eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
-            break;
-        }
+        if (eql(u8, relay_buf[0..2], net_msg.data[0..2])) break;
+
+        log.debug("dropping packet from {f} expected {any} got {any} ", .{ peer.addr, recv_msg[0..2], net_msg.data[0..2] });
         r.interface.tossBuffered();
     }
     log.info("bounce received {}", .{recv_msg.len});
@@ -271,15 +272,14 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                 }
             };
             lzone = .{ .name = try cache.store(domain.zone) };
-            log.debug("r question = {s}", .{q.name});
-            log.debug("r question = \n{f}", .{q});
+            log.info("r question = {s}", .{q.name});
+            log.info("r question = \n{f}", .{q});
             log.info("{f}", .{q});
         },
         .answer => |r| {
             log.debug("r answer      = {s: <6} -> {s} ", .{ @tagName(r.rtype), r.name });
             log.debug("r               {}", .{r.data});
-            log.debug("r question = \n{f}", .{r});
-            log.info("{f}", .{r});
+            log.debug("r answer = \n{f}", .{r});
             if (tld.zones.getOrPut(a, lzone)) |gop| {
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) {
@@ -310,8 +310,8 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                     .a => try zone.behavior.cached.a.append(a, .{ .bytes = r.data.a, .port = 0 }),
                     .aaaa => try zone.behavior.cached.aaaa.append(a, .{ .bytes = r.data.aaaa, .port = 0 }),
                     .soa => {
-                        log.debug("r               {s}", .{r.data.soa.mname});
-                        log.debug("r               {s}", .{r.data.soa.rname});
+                        log.debug("r soa m         {s}", .{r.data.soa.mname});
+                        log.debug("r soa r         {s}", .{r.data.soa.rname});
                     },
                     else => {},
                 }
@@ -499,8 +499,8 @@ fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Q
     const mp: *MsgPtr = try a.create(MsgPtr);
     const msg = try downstream.receive(io, mp);
     log.info("received {}", .{msg.data.len});
-    log.debug("data {any}", .{msg.data});
-    log.debug("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
+    log.info("data {any}", .{msg.data});
+    log.info("received from {any}", .{@as(*const [4]u8, @ptrCast(&msg.from.ip4))});
 
     try q.putOne(io, .{
         .msg = msg,

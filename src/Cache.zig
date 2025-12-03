@@ -64,10 +64,11 @@ pub const Zone = struct {
 pub const Behavior = union(enum) {
     new: void,
     nxdomain: u32,
-    cached: Behavior.Result,
+    cached: Result,
 
     pub const Result = struct {
         expires: Io.Timestamp = .zero,
+
         a: ArrayList(Ip4) = .{},
         aaaa: ArrayList(Ip6) = .{},
         cname: ArrayList(u8) = .{},
