@@ -135,7 +135,7 @@ fn sendCachedAnswer(
 fn hitUpstream(
     net_msg: net.IncomingMessage,
     downstream: net.Socket,
-    relay_buf: *[1024]u8,
+    relay_buf: *[2048]u8,
     io: Io,
 ) !DNS.Message {
     const peer, const upstream = upstreams.get();
@@ -157,16 +157,21 @@ fn hitUpstream(
     }) {
         if (attempt > 10)
             log.err("***    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
+        if (attempt > 100) return error.UpstreamFailure;
         try w.interface.writeAll(net_msg.data);
         try w.interface.flush();
         const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
-        if (ready == 0) continue;
-        r.interface.fillMore() catch @panic("fixme");
+        if (ready == 0 and r.interface.bufferedLen() < 50) continue;
+        if (r.interface.bufferedLen() < 4)
+            r.interface.fillMore() catch @panic("unreachable");
         recv_msg = r.interface.buffered();
-        if (eql(u8, relay_buf[0..2], net_msg.data[0..2])) break;
-
-        log.debug("dropping packet from {f} expected {any} got {any} ", .{ peer.addr, recv_msg[0..2], net_msg.data[0..2] });
-        r.interface.tossBuffered();
+        if (!eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
+            log.warn("dropping packet from {f} expected {any} got {any} ", .{
+                peer.addr, recv_msg[0..2], net_msg.data[0..2],
+            });
+            if (attempt > 20) r.interface.tossBuffered();
+            continue;
+        } else break;
     }
     log.info("bounce received {}", .{recv_msg.len});
     log.debug("bounce data {any}", .{recv_msg});
@@ -237,8 +242,8 @@ fn core(
         .answer => break,
     };
 
-    var relay_buf: [1024]u8 = undefined;
-    const rmsg: DNS.Message = try hitUpstream(net_msg, downstream, &relay_buf, io);
+    var relay_buf: [2048]u8 = undefined;
+    const rmsg: DNS.Message = hitUpstream(net_msg, downstream, &relay_buf, io) catch return false;
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
