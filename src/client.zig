@@ -22,19 +22,18 @@ pub fn main() !void {
     const addr: net.IpAddress = .{ .ip4 = .{ .bytes = nameserver, .port = 53 } };
     const upstream: net.Stream = try addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
 
-    var request: [1024]u8 = undefined;
-    const msg = try DNS.Message.query(&[1][]const u8{domain orelse "gr.ht."}, &request);
+    const msg = try DNS.Message.query(&[1][]const u8{domain orelse "gr.ht."});
 
-    log.err("msg {}", .{msg.bytes.len});
-    log.err("data {any}", .{request[0..msg.bytes.len]});
-    log.err("data {s}", .{request[0..msg.bytes.len]});
+    log.err("msg {}", .{msg.slice().len});
+    log.err("data {any}", .{msg.slice()});
+    log.err("data {s}", .{msg.slice()});
 
     var w_b: [512]u8 = undefined;
     var w = upstream.writer(io, &w_b);
     var r_b: [512]u8 = undefined;
     var r = upstream.reader(io, &r_b);
 
-    try w.interface.writeAll(request[0..msg.bytes.len]);
+    try w.interface.writeAll(msg.slice());
 
     try r.interface.fillMore();
     const buffer = r.interface.buffered();

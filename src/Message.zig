@@ -1,7 +1,8 @@
 header: Header,
-bytes: []const u8,
-questions: ?ArrayList(Question) = null,
-answers: ?ArrayList(Resource) = null,
+bytes: [1024]u8,
+len: usize = 0,
+questions: ArrayList(Question) = .{},
+answers: ArrayList(Resource) = .{},
 
 const Message = @This();
 
@@ -248,14 +249,26 @@ pub const Class = enum(u16) {
     _,
 };
 
-pub fn fromBytes(bytes: []const u8) !Message {
-    if (bytes.len < 12) return error.MessageTooSmall;
-    const header: Header = .fromBytes(bytes[0..12].*);
+pub fn init(r: *Reader) !Message {
+    if (r.bufferedLen() < 12) return error.MessageTooSmall;
+    const header: Header = .init(r);
+    const last = header.qdcount + header.ancount +
+        header.nscount + header.arcount -| 1;
+    var name_buf: [1024]u8 = undefined;
+    r.seek -|= 12;
+    _ = try payload(header, r, last, &name_buf);
 
-    return .{
+    var msg: Message = .{
         .header = header,
-        .bytes = bytes,
+        .bytes = undefined,
+        .len = r.seek,
     };
+    @memcpy(msg.bytes[0..msg.len], r.buffer[0..msg.len]);
+    return msg;
+}
+
+pub fn slice(msg: *const Message) []const u8 {
+    return msg.bytes[0..msg.len];
 }
 
 pub const Iterator = struct {
@@ -276,58 +289,52 @@ pub const Iterator = struct {
         if (iter.index >= h.qdcount + h.ancount + h.nscount + h.arcount) return null;
 
         defer iter.index += 1;
-        return try iter.msg.payload(iter.index, &iter.name_buffer);
+        var reader: Reader = .fixed(iter.msg.slice());
+        return try payload(h, &reader, iter.index, &iter.name_buffer);
     }
 };
 
-pub fn iterator(msg: *const Message) Iterator {
-    return Iterator.init(msg);
-}
-
 pub fn parse(msg: *Message, a: Allocator) !void {
-    var itr = iterator(msg);
-    msg.questions = .{};
-    errdefer msg.questions.?.deinit(a);
-    errdefer for (msg.questions.?.items) |q| a.free(q.name);
-    msg.answers = .{};
-    errdefer msg.answers.?.deinit(a);
-    errdefer for (msg.answers.?.items) |an| a.free(an.name);
+    var itr: Iterator = .init(msg);
+    errdefer msg.questions.deinit(a);
+    errdefer for (msg.questions.items) |q| a.free(q.name);
+    errdefer msg.answers.deinit(a);
+    errdefer for (msg.answers.items) |an| a.free(an.name);
     while (try itr.next()) |pyld| switch (pyld) {
         .question => |q| {
-            try msg.questions.?.append(a, q);
-            const name = try a.dupe(u8, msg.questions.?.items[msg.questions.?.items.len - 1].name);
-            msg.questions.?.items[msg.questions.?.items.len - 1].name = name;
+            try msg.questions.append(a, q);
+            const name = try a.dupe(u8, msg.questions.items[msg.questions.items.len - 1].name);
+            msg.questions.items[msg.questions.items.len - 1].name = name;
         },
         .answer => |ans| {
-            try msg.answers.?.append(a, ans);
-            const name = try a.dupe(u8, msg.answers.?.items[msg.answers.?.items.len - 1].name);
-            msg.answers.?.items[msg.answers.?.items.len - 1].name = name;
+            try msg.answers.append(a, ans);
+            const name = try a.dupe(u8, msg.answers.items[msg.answers.items.len - 1].name);
+            msg.answers.items[msg.answers.items.len - 1].name = name;
         },
     };
 }
 
-pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
-    const payload_end = msg.header.qdcount + msg.header.ancount +
-        msg.header.nscount + msg.header.arcount;
+pub fn payload(header: Header, r: *Reader, index: usize, name_buf: []u8) !Payload {
+    const payload_end = header.qdcount + header.ancount +
+        header.nscount + header.arcount;
     if (index >= payload_end) return error.InvalidIndex;
 
     //var idx: usize = 12;
-    var r: Reader = .fixed(msg.bytes);
     _ = try r.discard(.limited(12));
     for (0..payload_end) |payload_idx| {
-        if (payload_idx < msg.header.qdcount) {
+        if (payload_idx < header.qdcount) {
             if (payload_idx == index) {
                 return .{ .question = .{
-                    .name = try Label.getName(name_buf, &r),
+                    .name = try Label.getName(name_buf, r),
                     .qtype = try r.takeEnumNonexhaustive(Type, .big),
                     .class = try r.takeEnumNonexhaustive(Class, .big),
                 } };
             } else {
-                _ = try Label.getName(name_buf, &r);
+                _ = try Label.getName(name_buf, r);
                 _ = try r.discard(.limited(4));
             }
-        } else if (payload_idx >= msg.header.qdcount) {
-            const name = try Label.getName(name_buf, &r);
+        } else if (payload_idx >= header.qdcount) {
+            const name = try Label.getName(name_buf, r);
             const rtype: Type = try r.takeEnumNonexhaustive(Type, .big);
             const class: Class = try r.takeEnumNonexhaustive(Class, .big);
             const ttl: TTL = .seconds(try r.takeInt(i32, .big));
@@ -342,8 +349,8 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                 .aaaa => .{ .aaaa = (try r.takeArray(16)).* },
                 .cname => .{ .cname = try r.take(rdlen) },
                 .soa => .{ .soa = .{
-                    .mname = try Label.getName(name_buf[128..], &r),
-                    .rname = try Label.getName(name_buf[256..], &r),
+                    .mname = try Label.getName(name_buf[128..], r),
+                    .rname = try Label.getName(name_buf[256..], r),
                     .serial = try r.takeInt(u32, .big),
                     .refresh = try r.takeInt(u32, .big),
                     .retry = try r.takeInt(u32, .big),
@@ -351,7 +358,9 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
                     .minimum = try r.takeInt(u32, .big),
                 } },
                 .EDNS => .{ .EDNS = try r.take(rdlen) },
-                .https => .{ ._null = {} },
+                .https => .{ ._null = {
+                    _ = try r.discard(.limited(rdlen));
+                } },
                 else => |err| {
                     log.err("not implemented {}", .{err});
                     return error.ResponseTypeNotImplemented;
@@ -371,7 +380,7 @@ pub fn payload(msg: Message, index: usize, name_buf: []u8) !Payload {
     } else return error.InvalidIndex;
 }
 
-pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
+pub fn query(fqdns: []const []const u8) !Message {
     var msg: Message = .{
         .header = .{
             .id = @as(u16, 31337),
@@ -387,16 +396,16 @@ pub fn query(fqdns: []const []const u8, buffer: []u8) !Message {
             .nscount = 0,
             .arcount = 0,
         },
-        .bytes = buffer,
+        .bytes = undefined,
     };
 
-    var w: Writer = .fixed(buffer);
+    var w: Writer = .fixed(&msg.bytes);
     var idx = try msg.write(&w);
     for (fqdns) |fqdn| {
         const q: Question = .init(fqdn);
         idx += try q.write(&w);
     }
-    msg.bytes.len = idx;
+    msg.len = idx;
     return msg;
 }
 
@@ -405,7 +414,7 @@ pub const AnswerData = struct {
     ips: []const Resource.RData,
 };
 
-pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
+pub fn answer(id: u16, answers: []const AnswerData) !Message {
     var h: Header = .answer;
     h.id = id;
     h.rcode = if (answers.len == 1 and answers[0].ips.len == 0) .name else .success;
@@ -413,8 +422,8 @@ pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
     for (answers) |ans| {
         h.ancount += @intCast(ans.ips.len);
     }
-
-    var w: Writer = .fixed(bytes);
+    var msg: Message = undefined;
+    var w: Writer = .fixed(&msg.bytes);
     var idx = try h.write(&w);
 
     var pbufs: [8]u14 = @splat(0);
@@ -442,14 +451,13 @@ pub fn answer(id: u16, answers: []const AnswerData, bytes: []u8) !Message {
         }
     } else return error.NotImplemented;
 
-    return .{
-        .header = h,
-        .bytes = bytes[0..idx],
-    };
+    msg.header = h;
+    msg.len = idx;
+    return msg;
 }
 
-pub fn answerDrop(id: u16, fqdn: []const u8, bytes: []u8) !Message {
-    return try answer(id, &[1]AnswerData{.{ .fqdn = fqdn, .ips = &.{} }}, bytes);
+pub fn answerDrop(id: u16, fqdn: []const u8) !Message {
+    return try answer(id, &[1]AnswerData{.{ .fqdn = fqdn, .ips = &.{} }});
 }
 
 pub fn write(m: Message, w: *Writer) !usize {
@@ -459,24 +467,20 @@ pub fn write(m: Message, w: *Writer) !usize {
     var pbufs: [32]u14 = @splat(0);
     var ptr_idx: [*]u14 = (&pbufs).ptr;
 
-    if (m.questions) |questions| {
-        for (questions.items) |question| {
-            ptr_idx[0] = @intCast(idx);
-            idx += try question.write(w);
-            ptr_idx += 1;
-        }
+    for (m.questions.items) |question| {
+        ptr_idx[0] = @intCast(idx);
+        idx += try question.write(w);
+        ptr_idx += 1;
     }
 
-    if (m.answers) |answers| {
-        for (answers.items) |ans| {
-            for (m.questions.?.items, 0..) |qn, i| {
-                if (std.mem.eql(u8, ans.name, qn.name)) {
-                    idx += try ans.write(w, pbufs[i]);
-                    break;
-                }
-            } else {
-                idx += try ans.write(w, null);
+    for (m.answers.items) |ans| {
+        for (m.questions.items, 0..) |qn, i| {
+            if (std.mem.eql(u8, ans.name, qn.name)) {
+                idx += try ans.write(w, pbufs[i]);
+                break;
             }
+        } else {
+            idx += try ans.write(w, null);
         }
     }
 
@@ -484,8 +488,7 @@ pub fn write(m: Message, w: *Writer) !usize {
 }
 
 test query {
-    var buffer: [23]u8 = undefined;
-    const q = try query(&[1][]const u8{"gr.ht."}, &buffer);
+    const q = try query(&[1][]const u8{"gr.ht."});
     try std.testing.expectEqual(
         @as(u96, 37884113131630398792389361664),
         @as(u96, @bitCast(q.header)),
@@ -503,12 +506,13 @@ test Message {
         210, 0,   0,   0,   0,   0,   0,   0,   2,
     };
 
-    var msg1 = try Message.fromBytes(&source_bytes);
+    var r: Reader = .fixed(&source_bytes);
+    var msg1 = try Message.init(&r);
     try msg1.parse(std.testing.allocator);
-    defer msg1.questions.?.deinit(std.testing.allocator);
-    defer msg1.answers.?.deinit(std.testing.allocator);
-    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
-    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer msg1.questions.deinit(std.testing.allocator);
+    defer msg1.answers.deinit(std.testing.allocator);
+    defer for (msg1.questions.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.items) |itm| std.testing.allocator.free(itm.name);
 
     var w_b: [source_bytes.len]u8 = undefined;
     var fixed: Writer = .fixed(&w_b);
@@ -553,13 +557,14 @@ test "Message.1" {
         232, 0,   0,   3,   232, 0,   0,   3,   232, 0,   0,   7,   8,
     };
 
-    var msg1 = try Message.fromBytes(&source_bytes);
+    var r: Reader = .fixed(&source_bytes);
+    var msg1 = try Message.init(&r);
     var w_b: [source_bytes.len]u8 = undefined;
     try msg1.parse(std.testing.allocator);
-    defer msg1.questions.?.deinit(std.testing.allocator);
-    defer msg1.answers.?.deinit(std.testing.allocator);
-    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
-    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer msg1.questions.deinit(std.testing.allocator);
+    defer msg1.answers.deinit(std.testing.allocator);
+    defer for (msg1.questions.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.items) |itm| std.testing.allocator.free(itm.name);
 
     var fixed: Writer = .fixed(&w_b);
     _ = try msg1.write(&fixed);
@@ -590,12 +595,13 @@ test "arcount > 0" {
         0, 10, 0, 8, 71, 81, 31, 7, 45, 247, 239, 125, // rdata
     };
 
-    var msg1 = try Message.fromBytes(&source_bytes);
+    var r: Reader = .fixed(&source_bytes);
+    var msg1 = try Message.init(&r);
     try msg1.parse(std.testing.allocator);
-    defer msg1.questions.?.deinit(std.testing.allocator);
-    defer msg1.answers.?.deinit(std.testing.allocator);
-    defer for (msg1.questions.?.items) |itm| std.testing.allocator.free(itm.name);
-    defer for (msg1.answers.?.items) |itm| std.testing.allocator.free(itm.name);
+    defer msg1.questions.deinit(std.testing.allocator);
+    defer msg1.answers.deinit(std.testing.allocator);
+    defer for (msg1.questions.items) |itm| std.testing.allocator.free(itm.name);
+    defer for (msg1.answers.items) |itm| std.testing.allocator.free(itm.name);
 
     var w_b: [source_bytes.len]u8 = undefined;
     var fixed: Writer = .fixed(&w_b);

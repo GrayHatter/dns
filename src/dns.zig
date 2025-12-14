@@ -120,9 +120,8 @@ test "Message.Header" {
 }
 
 test "build pkt" {
-    var buffer: [23]u8 = undefined;
-    const msg = try Message.query(&[1][]const u8{"gr.ht."}, &buffer);
-    try std.testing.expectEqual(msg.bytes.len, 23);
+    const msg = try Message.query(&[1][]const u8{"gr.ht."});
+    try std.testing.expectEqual(msg.len, 23);
 
     try std.testing.expectEqualSlices(
         u8,
@@ -130,14 +129,13 @@ test "build pkt" {
             122, 105, 1,   0, 0,   1,   0, 0, 0, 0, 0, 0,
             2,   103, 114, 2, 104, 116, 0, 0, 1, 0, 1,
         },
-        buffer[0..23],
+        msg.bytes[0..23],
     );
 }
 
 test "build pkt non-fqdn" {
-    var buffer: [23]u8 = undefined;
-    const msg = try Message.query(&[1][]const u8{"gr.ht"}, &buffer);
-    try std.testing.expectEqual(msg.bytes.len, 23);
+    const msg = try Message.query(&[1][]const u8{"gr.ht"});
+    try std.testing.expectEqual(msg.slice().len, 23);
 
     try std.testing.expectEqualSlices(
         u8,
@@ -145,26 +143,23 @@ test "build pkt non-fqdn" {
             122, 105, 1,   0, 0,   1,   0, 0, 0, 0, 0, 0,
             2,   103, 114, 2, 104, 116, 0, 0, 1, 0, 1,
         },
-        buffer[0..23],
+        msg.bytes[0..23],
     );
 }
 
 test "build answer" {
-    var buffer: [39]u8 = undefined;
-
     const msg0 = try Message.answer(
         31337,
         &[1]Message.AnswerData{
             .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
         },
-        &buffer,
     );
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
         122, 105, 129, 128, 0, 1,  0,  1,   0,  0, 0, 0, 2, 103, 114, 2,
         104, 116, 0,   0,   1, 0,  1,  192, 12, 0, 1, 0, 1, 0,   0,   0,
         30,  0,   4,   127, 4, 20, 69,
-    }, &buffer);
+    }, msg0.bytes[0..msg0.len]);
     try std.testing.expectEqual(msg0.header.qdcount, 1);
     try std.testing.expectEqual(msg0.header.ancount, 1);
 
@@ -173,31 +168,27 @@ test "build answer" {
         &[1]Message.AnswerData{
             .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
         },
-        &buffer,
     );
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
         122, 105, 129, 128, 0, 1,  0,  1,   0,  0, 0, 0, 2, 103, 114, 2,
         104, 116, 0,   0,   1, 0,  1,  192, 12, 0, 1, 0, 1, 0,   0,   0,
         30,  0,   4,   127, 4, 20, 69,
-    }, &buffer);
+    }, msg1.bytes[0..msg1.len]);
     try std.testing.expectEqual(msg1.header.qdcount, 1);
     try std.testing.expectEqual(msg1.header.ancount, 1);
-
-    var big_buffer: [100]u8 = undefined;
 
     const msg2 = try Message.answer(
         31337,
         &[1]Message.AnswerData{
             .{ .fqdn = "gr.ht.", .ips = &[1]Message.Resource.RData{.{ .a = .{ 127, 4, 20, 69 } }} },
         },
-        &big_buffer,
     );
     try std.testing.expectEqualSlices(u8, &[_]u8{
         122, 105, 129, 128, 0, 1,  0,  1,   0,  0, 0, 0, 2, 103, 114, 2,
         104, 116, 0,   0,   1, 0,  1,  192, 12, 0, 1, 0, 1, 0,   0,   0,
         30,  0,   4,   127, 4, 20, 69,
-    }, msg2.bytes);
+    }, msg2.bytes[0..msg2.len]);
 }
 
 test "response iter" {
@@ -209,8 +200,10 @@ test "response iter" {
             0,   1,   44,  0,   16,  42,  1,   4,   249, 48,  81,  75,
             210, 0,   0,   0,   0,   0,   0,   0,   2,
         };
-        const msg: Message = try .fromBytes(&base);
-        var it = msg.iterator();
+
+        var reader: Reader = .fixed(&base);
+        const msg: Message = try .init(&reader);
+        var it: Message.Iterator = .init(&msg);
         try std.testing.expectEqual(msg.header.qdcount, 1);
         try std.testing.expectEqual(msg.header.ancount, 1);
         var count: usize = 2;
@@ -246,8 +239,9 @@ test "response iter" {
             97,  109, 97,  105, 192, 26,  103, 212, 110, 234, 0,   0,   3,
             232, 0,   0,   3,   232, 0,   0,   3,   232, 0,   0,   7,   8,
         };
-        const msg: Message = try .fromBytes(&base);
-        var it = msg.iterator();
+        var reader: Reader = .fixed(&base);
+        const msg: Message = try .init(&reader);
+        var it: Message.Iterator = .init(&msg);
         try std.testing.expectEqual(msg.header.qdcount, 1);
         try std.testing.expectEqual(msg.header.ancount, 4);
         try std.testing.expectEqual(msg.header.arcount, 0);
@@ -288,8 +282,9 @@ test "response iter" {
               0,   0, 41, 2, 0, 0, 0, 128, 0, 0, 0,
           };
         // zig fmt: on
-        const msg: Message = try .fromBytes(&base);
-        var it = msg.iterator();
+        var reader: Reader = .fixed(&base);
+        const msg: Message = try .init(&reader);
+        var it: Message.Iterator = .init(&msg);
         try std.testing.expectEqual(msg.header.qdcount, 1);
         try std.testing.expectEqual(msg.header.ancount, 14);
         try std.testing.expectEqual(msg.header.arcount, 1);
@@ -314,8 +309,12 @@ test "response iter" {
             12,  0,   65,  0,   1,   0,   0, 50,  227, 0,   13,  0,
             1,   0,   0,   1,   0,   6,   2, 104, 50,  2,   104, 51,
         };
-        const msg: Message = try .fromBytes(&base);
-        var it = msg.iterator();
+        var reader: Reader = .fixed(&base);
+        const msg: Message = try .init(&reader);
+
+        try std.testing.expectEqual(base.len, msg.len);
+
+        var it: Message.Iterator = .init(&msg);
         try std.testing.expectEqual(msg.header.qdcount, 1);
         try std.testing.expectEqual(msg.header.ancount, 1);
         try std.testing.expectEqual(msg.header.arcount, 0);
@@ -334,29 +333,29 @@ test "response iter" {
 }
 
 test "build answerDrop" {
-    var buffer: [23]u8 = @splat(0xff);
-    const msg0 = try Message.answerDrop(31337, "gr.ht.", &buffer);
+    const msg0 = try Message.answerDrop(31337, "gr.ht.");
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
         122, 105, 129, 131, 0,   1,   0, 0, 0, 0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0, 1, 0, 1,
-    }, &buffer);
+    }, msg0.slice());
     try std.testing.expectEqual(msg0.header.qdcount, 1);
     try std.testing.expectEqual(msg0.header.ancount, 0);
 }
 
 test "grht vectors" {
     //const a = std.testing.allocator;
-    const msg0 = try Message.fromBytes(&[_]u8{
+    var reader: Reader = .fixed(&[_]u8{
         122, 105, 129, 128, 0,   1,   0, 1,  0,  0, 0, 0,
         2,   103, 114, 2,   104, 116, 0, 0,  1,  0, 1, 192,
         12,  0,   1,   0,   1,   0,   0, 14, 16, 0, 4, 127,
         4,   20,  69,
     });
+    const msg0 = try Message.init(&reader);
     try std.testing.expectEqual(msg0.header.qdcount, 1);
     try std.testing.expectEqual(msg0.header.ancount, 1);
 
-    const msg1 = try Message.fromBytes(&[_]u8{
+    var reader1: Reader = .fixed(&[_]u8{
         122, 105, 129, 131, 0,   1,   0,   0,   0,   1,   0,   0,   2,   64,
         49,  1,   49,  1,   49,  1,   49,  0,   0,   1,   0,   1,   0,   0,
         6,   0,   1,   0,   1,   81,  128, 0,   64,  1,   97,  12,  114, 111,
@@ -366,6 +365,7 @@ test "grht vectors" {
         44,  0,   0,   7,   8,   0,   0,   3,   132, 0,   9,   58,  128, 0,
         1,   81,  128,
     });
+    const msg1 = try Message.init(&reader1);
     try std.testing.expectEqual(msg1.header.qdcount, 1);
     try std.testing.expectEqual(msg1.header.ancount, 0);
 }

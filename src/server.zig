@@ -61,12 +61,11 @@ fn sendCachedAnswer(
     const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
     zone.hits += 1;
     log.err("    {} hits ({}ms remain)", .{ zone.hits, duration.toMilliseconds() });
-    var ans_bytes: [512]u8 = undefined;
     switch (zone.behavior) {
         .nxdomain => {
             if (mheader.qdcount == 1) {
-                const ans: DNS.Message = try .answerDrop(mheader.id, q.name, &ans_bytes);
-                try downstream.send(io, &addr, ans.bytes);
+                const ans: DNS.Message = try .answerDrop(mheader.id, q.name);
+                try downstream.send(io, &addr, ans.slice());
                 log.err("dropping request for {s}", .{q.name});
                 return true;
             }
@@ -97,11 +96,10 @@ fn sendCachedAnswer(
                     const ans: DNS.Message = try .answer(
                         mheader.id,
                         &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
-                        &ans_bytes,
                     );
-                    log.debug("cached answer {any}", .{ans.bytes});
+                    log.debug("cached answer {any}", .{ans.slice()});
                     //std.time.sleep(100_000);
-                    try downstream.send(io, &addr, ans.bytes);
+                    try downstream.send(io, &addr, ans.slice());
                     return true;
                 },
 
@@ -117,9 +115,8 @@ fn sendCachedAnswer(
                     const ans: DNS.Message = try .answer(
                         mheader.id,
                         &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
-                        &ans_bytes,
                     );
-                    try downstream.send(io, &addr, ans.bytes);
+                    try downstream.send(io, &addr, ans.slice());
                     log.info("{f}\n", .{ans.header});
                     return true;
                 },
@@ -135,13 +132,13 @@ fn sendCachedAnswer(
 fn hitUpstream(
     net_msg: net.IncomingMessage,
     downstream: net.Socket,
-    relay_buf: *[2048]u8,
     io: Io,
 ) !DNS.Message {
     const peer, const upstream = upstreams.get();
     var w_b: [512]u8 = undefined;
+    var relay_buf: [2048]u8 = undefined;
     var w = upstream.writer(io, &w_b);
-    var r = upstream.reader(io, relay_buf);
+    var r = upstream.reader(io, &relay_buf);
     log.warn("    hitting upstream {f}", .{peer.addr});
     var pollfds: [1]linux.pollfd = .{.{
         .fd = upstream.socket.handle,
@@ -155,9 +152,9 @@ fn hitUpstream(
         pollfds[0].revents = 0;
         attempt +|= 1;
     }) {
-        if (attempt > 10)
+        if (attempt > 3)
             log.err("***    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
-        if (attempt > 100) return error.UpstreamFailure;
+        if (attempt > 10) return error.UpstreamFailure;
         try w.interface.writeAll(net_msg.data);
         try w.interface.flush();
         const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
@@ -169,7 +166,7 @@ fn hitUpstream(
             log.warn("dropping packet from {f} expected {any} got {any} ", .{
                 peer.addr, recv_msg[0..2], net_msg.data[0..2],
             });
-            if (attempt > 20) r.interface.tossBuffered();
+            r.interface.tossBuffered();
             continue;
         } else break;
     }
@@ -183,7 +180,7 @@ fn hitUpstream(
     }
     //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
     try downstream.send(io, &net_msg.from, recv_msg);
-    return try .fromBytes(recv_msg);
+    return try .init(&r.interface);
 }
 
 fn core(
@@ -193,7 +190,8 @@ fn core(
     a: Allocator,
     io: Io,
 ) !bool {
-    const msg: DNS.Message = try .fromBytes(net_msg.data);
+    var reader: Reader = .fixed(net_msg.data);
+    const msg: DNS.Message = try .init(&reader);
 
     log.info("incoming packet\n{f}", .{msg.header});
 
@@ -203,7 +201,7 @@ fn core(
         return true;
     }
 
-    var iter = msg.iterator();
+    var iter: DNS.Message.Iterator = .init(&msg);
     while (iter.next() catch |err| e: {
         log.err("question iter error {}", .{err});
         log.err("qdata {any}", .{net_msg.data});
@@ -242,13 +240,12 @@ fn core(
         .answer => break,
     };
 
-    var relay_buf: [2048]u8 = undefined;
-    const rmsg: DNS.Message = hitUpstream(net_msg, downstream, &relay_buf, io) catch return false;
+    const rmsg: DNS.Message = hitUpstream(net_msg, downstream, io) catch return false;
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
     cacheAnswer(cache, rmsg, a, io) catch |err| {
-        log.err("rdata {any}", .{relay_buf});
+        log.err("rdata {any}", .{rmsg.slice()});
         return err;
     };
 
@@ -264,7 +261,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
     try ZoneCache.mutex.lock(io);
     defer ZoneCache.mutex.unlock(io);
 
-    var rit = rmsg.iterator();
+    var rit = DNS.Message.Iterator.init(&rmsg);
     while (rit.next() catch |err| {
         log.err("relayed iter error {}", .{err});
         return err;

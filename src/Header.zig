@@ -28,10 +28,12 @@ pub const Header = packed struct(u96) {
         _, // Reserved for future use
     };
 
-    pub fn fromBytes(bytes: [12]u8) Header {
-        const id: u16 = @byteSwap(@as(u16, @bitCast(bytes[0..2].*)));
-        const hbits: u8 = bytes[2];
-        const lbits: u8 = bytes[3];
+    /// reader must have 12 bytes buffered
+    pub fn init(r: *Reader) Header {
+        std.debug.assert(r.bufferedLen() > 12);
+        const id: u16 = r.takeInt(u16, .big) catch unreachable;
+        const hbits: u8 = r.takeByte() catch unreachable;
+        const lbits: u8 = r.takeByte() catch unreachable;
 
         return .{
             .id = id,
@@ -42,10 +44,10 @@ pub const Header = packed struct(u96) {
             .rd = 0x1 & hbits != 0,
             .ra = 0x80 & lbits != 0,
             .rcode = @enumFromInt(0xf & (lbits)),
-            .qdcount = @byteSwap(@as(u16, @bitCast(bytes[4..6].*))),
-            .ancount = @byteSwap(@as(u16, @bitCast(bytes[6..8].*))),
-            .nscount = @byteSwap(@as(u16, @bitCast(bytes[8..10].*))),
-            .arcount = @byteSwap(@as(u16, @bitCast(bytes[10..12].*))),
+            .qdcount = r.takeInt(u16, .big) catch unreachable,
+            .ancount = r.takeInt(u16, .big) catch unreachable,
+            .nscount = r.takeInt(u16, .big) catch unreachable,
+            .arcount = r.takeInt(u16, .big) catch unreachable,
         };
     }
 
@@ -122,3 +124,4 @@ test "format" {
 
 const std = @import("std");
 const Writer = std.Io.Writer;
+const Reader = std.Io.Reader;
