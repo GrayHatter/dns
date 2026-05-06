@@ -57,7 +57,7 @@ fn sendCachedAnswer(
     // 40 seems large here, but I've seen 20 exhaust the buffer
     var res_buff: [40]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
-    const now: Io.Timestamp = Io.Clock.real.now(io);
+    const now: Io.Timestamp = Io.Clock.awake.now(io);
     const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
     zone.hits += 1;
     log.err("    {} hits ({}ms remain)", .{ zone.hits, duration.toMilliseconds() });
@@ -171,7 +171,7 @@ fn hitUpstream(
                 });
                 r.interface.tossBuffered();
             }
-            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(50), .clock = .real };
+            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(50), .clock = .awake };
             try wait.sleep(io);
 
             continue;
@@ -260,7 +260,7 @@ fn core(
 }
 
 fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void {
-    const now: Io.Timestamp = Io.Clock.real.now(io);
+    const now: Io.Timestamp = Io.Clock.awake.now(io);
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
@@ -484,11 +484,11 @@ fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
     while (q.getOne(io)) |msg_| {
         defer a.destroy(msg_.ptr);
         var msg = msg_;
-        const lap = msg.start.untilNow(io, .real);
+        const lap = msg.start.untilNow(io, .awake);
         if (core(msg.cache, msg.msg, msg.downstream, a, io) catch @panic("bah!")) {
-            log.err("    **    cached response {d}us", .{lap.toMilliseconds()});
+            log.err("    **    cached response {f}", .{lap});
         } else {
-            log.err("    ->    upstream responded {d}us", .{lap.toMilliseconds()});
+            log.err("    ->    upstream responded {f}", .{lap});
         }
     } else |_| {}
 }
@@ -505,7 +505,7 @@ fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Q
         .ptr = mp,
         .cache = cache,
         .downstream = downstream,
-        .start = std.Io.Clock.real.now(io),
+        .start = std.Io.Clock.awake.now(io),
     });
 }
 
