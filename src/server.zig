@@ -145,28 +145,35 @@ fn hitUpstream(
         .events = std.math.maxInt(i16),
         .revents = 0,
     }};
-    var timeout: linux.timespec = .{ .sec = 0, .nsec = 65 * ns_per_ms };
+    var timeout: linux.timespec = .{ .sec = 0, .nsec = 100 * ns_per_ms };
     var recv_msg: []u8 = &.{};
     var attempt: u8 = 0;
+    try w.interface.writeAll(net_msg.data);
+    try w.interface.flush();
     while (true) : ({
         pollfds[0].revents = 0;
         attempt +|= 1;
     }) {
-        if (attempt > 3)
+        if (attempt > 3) {
             log.err("***    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
+            try w.interface.writeAll(net_msg.data);
+            try w.interface.flush();
+        }
         if (attempt > 10) return error.UpstreamFailure;
-        try w.interface.writeAll(net_msg.data);
-        try w.interface.flush();
         const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
         if (ready == 0 and r.interface.bufferedLen() < 50) continue;
-        if (r.interface.bufferedLen() < 4)
-            r.interface.fillMore() catch @panic("unreachable");
+        if (r.interface.bufferedLen() < 4) r.interface.fillMore() catch @panic("unreachable");
         recv_msg = r.interface.buffered();
         if (!eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
-            log.warn("dropping packet from {f} expected {any} got {any} ", .{
-                peer.addr, recv_msg[0..2], net_msg.data[0..2],
-            });
-            r.interface.tossBuffered();
+            if (attempt > 2) {
+                log.warn("dropping packet from {f} expected {any} got {any} ", .{
+                    peer.addr, recv_msg[0..2], net_msg.data[0..2],
+                });
+                r.interface.tossBuffered();
+            }
+            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(50), .clock = .real };
+            try wait.sleep(io);
+
             continue;
         } else break;
     }
