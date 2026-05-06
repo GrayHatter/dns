@@ -2,8 +2,8 @@ const ZoneCache = @This();
 pub var mutex: std.Io.Mutex = .init;
 
 alloc: Allocator,
-tld: std.StringHashMapUnmanaged(Zone) = .{},
-strings: std.ArrayListUnmanaged(u8) = .{},
+tld: std.StringHashMapUnmanaged(Zone) = .empty,
+strings: std.ArrayListUnmanaged(u8) = .empty,
 loc_table: std.HashMapUnmanaged(
     u32,
     void,
@@ -70,9 +70,9 @@ pub const Behavior = union(enum) {
     pub const Result = struct {
         expires: Io.Timestamp = .zero,
 
-        a: ArrayList(Ip4) = .{},
-        aaaa: ArrayList(Ip6) = .{},
-        cname: ArrayList(u8) = .{},
+        a: ArrayList(Ip4) = .empty,
+        aaaa: ArrayList(Ip6) = .empty,
+        cname: ArrayList(u8) = .empty,
     };
 };
 

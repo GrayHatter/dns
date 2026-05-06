@@ -1,8 +1,8 @@
 header: Header,
 bytes: [1024]u8,
 len: usize = 0,
-questions: ArrayList(Question) = .{},
-answers: ArrayList(Resource) = .{},
+questions: ArrayList(Question) = .empty,
+answers: ArrayList(Resource) = .empty,
 
 const Message = @This();
 

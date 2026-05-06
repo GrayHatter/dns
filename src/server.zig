@@ -42,7 +42,7 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
         \\  --drop-domain <fqdn>     Returns NXDOMAIN for any queries for given fqdn
         \\
     , .{arg0});
-    std.posix.exit(1);
+    std.os.linux.exit(1);
 }
 
 fn sendCachedAnswer(
@@ -57,7 +57,7 @@ fn sendCachedAnswer(
     // 40 seems large here, but I've seen 20 exhaust the buffer
     var res_buff: [40]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
-    const now: Io.Timestamp = try Io.Clock.real.now(io);
+    const now: Io.Timestamp = Io.Clock.real.now(io);
     const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
     zone.hits += 1;
     log.err("    {} hits ({}ms remain)", .{ zone.hits, duration.toMilliseconds() });
@@ -253,7 +253,7 @@ fn core(
 }
 
 fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void {
-    const now: Io.Timestamp = try Io.Clock.real.now(io);
+    const now: Io.Timestamp = Io.Clock.real.now(io);
 
     var lzone: Zone = undefined;
     var tld: *Zone = undefined;
@@ -295,7 +295,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                 const zone = gop.key_ptr;
                 if (!gop.found_existing) zone.behavior = .new;
                 switch (zone.behavior) {
-                    .new => zone.behavior = .{ .cached = .{ .expires = now, .a = .{}, .aaaa = .{} } },
+                    .new => zone.behavior = .{ .cached = .{ .expires = now, .a = .empty, .aaaa = .empty } },
                     .cached => {
                         if (zone.behavior.cached.expires.nanoseconds < now.nanoseconds) {
                             zone.behavior.cached.a.clearRetainingCapacity();
@@ -329,17 +329,15 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
 var blocked_ips: []const [4]u8 = &.{};
 const MsgPtr = [1024]u8;
 
-pub fn main() !void {
-    const a = std.heap.smp_allocator;
-    var threaded: std.Io.Threaded = .init(a);
-    defer threaded.deinit();
-    const io = threaded.io();
+pub fn main(init: std.process.Init) !void {
+    const a = init.arena.allocator();
+    const io = init.io;
 
-    var blocks: ArrayList([]const u8) = .{};
-    var blocked_ips_: ArrayList([4]u8) = .{};
-    var blocked_domains: ArrayList([]const u8) = .{};
+    var blocks: ArrayList([]const u8) = .empty;
+    var blocked_ips_: ArrayList([4]u8) = .empty;
+    var blocked_domains: ArrayList([]const u8) = .empty;
 
-    var argv = std.process.args();
+    var argv = init.minimal.args.iterate();
     const arg0 = argv.next().?;
     while (argv.next()) |arg| {
         if (eql(u8, arg, "--block")) {
@@ -372,8 +370,8 @@ pub fn main() !void {
     // nobody on my machine
     if (std.os.linux.getuid() == 0) {
         log.err("dropping root", .{});
-        _ = try std.posix.setgid(99);
-        _ = try std.posix.setuid(99);
+        _ = std.os.linux.setgid(99);
+        _ = std.os.linux.setuid(99);
     }
 
     log.err("started", .{});
@@ -381,18 +379,18 @@ pub fn main() !void {
     const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht", "rs" };
     for (preload_tlds) |ptld| try cache.tld.put(a, ptld, .{ .name = try cache.store(ptld) });
 
-    var blocked_results: ArrayList(Result) = .{};
+    var blocked_results: ArrayList(Result) = .empty;
     defer blocked_results.clearAndFree(a);
-    const cwd = std.fs.cwd();
+    const cwd = std.Io.Dir.cwd();
     for (blocks.items) |b| {
-        const file = cwd.openFile(b, .{}) catch continue;
-        defer file.close();
+        const file = cwd.openFile(io, b, .{}) catch continue;
+        defer file.close(io);
         var r_b: [2048]u8 = undefined;
         var r = file.reader(io, &r_b);
         try parseHostFile(&blocked_results, &r.interface, a);
     }
 
-    var local_results: ArrayList(Result) = .{};
+    var local_results: ArrayList(Result) = .empty;
     defer local_results.clearAndFree(a);
     try parseHosts(&local_results, a, io);
     for (local_results.items) |line| {
@@ -422,7 +420,10 @@ pub fn main() !void {
     defer _ = consume3.cancel(io);
 
     try upstreams.init(io);
-    const sigfd: Io.File = .{ .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))) };
+    const sigfd: Io.File = .{
+        .handle = @intCast(linux.signalfd(-1, &sigset, @bitCast(linux.O{ .NONBLOCK = false }))),
+        .flags = .{ .nonblocking = false },
+    };
     if (sigfd.handle < 0) @panic("signal fd failed");
     var pollfds: [2]linux.pollfd = .{
         .{ .fd = sigfd.handle, .events = std.math.maxInt(i16), .revents = 0 },
@@ -469,17 +470,18 @@ const Message = struct {
     ptr: *MsgPtr,
     cache: *ZoneCache,
     downstream: net.Socket,
-    timer: std.time.Timer,
+    start: std.Io.Timestamp,
 };
 
 fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
     while (q.getOne(io)) |msg_| {
         defer a.destroy(msg_.ptr);
         var msg = msg_;
+        const lap = msg.start.untilNow(io, .real);
         if (core(msg.cache, msg.msg, msg.downstream, a, io) catch @panic("bah!")) {
-            log.err("    **    cached response {d}us", .{msg.timer.lap() / 1000});
+            log.err("    **    cached response {d}us", .{lap.toMilliseconds()});
         } else {
-            log.err("    ->    upstream responded {d}us", .{msg.timer.lap() / 1000});
+            log.err("    ->    upstream responded {d}us", .{lap.toMilliseconds()});
         }
     } else |_| {}
 }
@@ -496,7 +498,7 @@ fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Q
         .ptr = mp,
         .cache = cache,
         .downstream = downstream,
-        .timer = try .start(),
+        .start = std.Io.Clock.real.now(io),
     });
 }
 
@@ -610,7 +612,7 @@ fn parseLine(a: Allocator, line: []const u8, list: *ArrayList(Result)) !void {
 
 test parseLine {
     const a = std.testing.allocator;
-    var list: ArrayList(Result) = .{};
+    var list: ArrayList(Result) = .empty;
     defer list.clearAndFree(a);
 
     try parseLine(a, "127.0.0.1 blerg", &list);
@@ -628,8 +630,8 @@ test parseLine {
 }
 
 fn parseHosts(list: *ArrayList(Result), a: Allocator, io: Io) !void {
-    const file = std.fs.openFileAbsolute("/etc/hosts", .{}) catch return;
-    defer file.close();
+    const file = std.Io.Dir.openFileAbsolute(io, "/etc/hosts", .{}) catch return;
+    defer file.close(io);
     var r_b: [2048]u8 = undefined;
     var r = file.reader(io, &r_b);
 
@@ -652,7 +654,7 @@ fn parseHostFile(list: *ArrayList(Result), r: *Reader, a: Allocator) !void {
 test parseHostFile {
     const a = std.testing.allocator;
     const io = std.testing.io;
-    var local_results: ArrayList(Result) = .{};
+    var local_results: ArrayList(Result) = .empty;
     defer local_results.clearAndFree(a);
     try parseHosts(&local_results, a, io);
     for (local_results.items) |line| {

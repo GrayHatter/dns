@@ -1,13 +1,11 @@
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     log.err("started", .{});
 
-    var threaded: std.Io.Threaded = .init_single_threaded;
-    defer threaded.deinit();
-    const io = threaded.io();
+    const io = init.io;
 
     var domain: ?[]const u8 = null;
     var nameserver: [4]u8 = @splat(0);
-    var argsi = std.process.args();
+    var argsi = init.minimal.args.iterate();
     while (argsi.next()) |arg| {
         if (arg[0] == '@') {
             var itr = std.mem.splitScalar(u8, arg[1..], '.');

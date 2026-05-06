@@ -1,7 +1,7 @@
 .{
     .name = .dns,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0-dev.1484+d0ba6642b",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0x82eddc4155c08ec3,
     .dependencies = .{},
     .paths = .{
