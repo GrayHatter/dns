@@ -129,11 +129,7 @@ fn sendCachedAnswer(
     return false;
 }
 
-fn hitUpstream(
-    net_msg: net.IncomingMessage,
-    downstream: net.Socket,
-    io: Io,
-) !DNS.Message {
+fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !DNS.Message {
     const peer, const upstream = upstreams.get();
     var w_b: [512]u8 = undefined;
     var relay_buf: [2048]u8 = undefined;
@@ -169,9 +165,11 @@ fn hitUpstream(
                 log.warn("dropping packet from {f} expected {any} got {any} ", .{
                     peer.addr, recv_msg[0..2], net_msg.data[0..2],
                 });
-                r.interface.tossBuffered();
+
+                _ = try DNS.Message.init(&r.interface);
+                if (attempt > 6) r.interface.tossBuffered();
             }
-            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(50), .clock = .awake };
+            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(95), .clock = .awake };
             try wait.sleep(io);
 
             continue;
