@@ -60,9 +60,12 @@ fn sendCachedAnswer(
     var res_buff: [40]RData = undefined;
     var addr_list: ArrayList(RData) = .initBuffer(&res_buff);
     const now: Io.Timestamp = Io.Clock.awake.now(io);
-    const duration: Io.Duration = if (zone.behavior == .cached) now.durationTo(zone.behavior.cached.expires) else .zero;
+    const duration: Io.Duration = if (zone.behavior == .cached)
+        now.durationTo(zone.behavior.cached.expires)
+    else
+        .zero;
     zone.hits += 1;
-    log.err("    {} hits ({}ms remain)", .{ zone.hits, duration.toMilliseconds() });
+    log.warn("      {} hits (TTL: {}ms)", .{ zone.hits, duration.toMilliseconds() });
     switch (zone.behavior) {
         .nxdomain => {
             if (mheader.qdcount == 1) {
@@ -76,10 +79,8 @@ fn sendCachedAnswer(
         },
         .cached => |c_result| {
             if (c_result.expires.nanoseconds < now.nanoseconds) {
-                log.warn(
-                    "cached {s} ttl expired {} ({})",
-                    .{ domain.zone, now.toSeconds() - c_result.expires.toSeconds(), c_result.expires },
-                );
+                const expired = now.toMilliseconds() - c_result.expires.toMilliseconds();
+                log.warn("      cached {s} expired {}s ago", .{ domain.zone, expired });
                 return false;
             }
             switch (q.qtype) {
@@ -108,7 +109,7 @@ fn sendCachedAnswer(
                 .aaaa => {
                     log.info("cached {s}", .{domain.zone});
                     if (c_result.aaaa.items.len == 0) {
-                        log.err("    aaaa request is null", .{});
+                        log.warn("      aaaa request is null", .{});
                         return false;
                     }
                     for (c_result.aaaa.items) |src| {
@@ -136,7 +137,7 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
     var w = &upstream.writer.interface;
     var r = &upstream.reader.interface;
     try r.rebase(2048);
-    log.warn("    hitting upstream {f}", .{peer.addr});
+    log.warn("      asking upstream {f}", .{peer.addr});
     var pollfds: [1]linux.pollfd = .{.{
         .fd = upstream.stream.socket.handle,
         .events = std.math.maxInt(i16),
@@ -168,7 +169,7 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
 
         const peek = r.peek(2) catch continue;
         if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
-        log.warn("from {f} expected {X} got {X} ", .{ peer.addr, peek[0..2], net_msg.data[0..2] });
+        log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], peer.addr });
         if (r.bufferedLen() > 60 and attempt > 4) {
             const save = r.seek;
             errdefer r.seek = save;
@@ -224,7 +225,7 @@ fn core(
         .question => |q| {
             try ZoneCache.mutex.lock(io);
             defer ZoneCache.mutex.unlock(io);
-            log.err("query {}:  [ {s} ]", .{ q.qtype, q.name });
+            log.err(" {s: >5}: [ {s} ]", .{ @tagName(q.qtype), q.name });
             const domain: Domain = .init(q.name);
             const tld: *Zone = f: {
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
@@ -248,7 +249,7 @@ fn core(
                     if (sent) return true;
                 } else |err| return err;
             } else {
-                log.err("    cache missing going to upstream", .{});
+                log.warn("      cache missing going to upstream", .{});
             }
         },
         .answer => break,
@@ -493,9 +494,9 @@ fn answer(q: *Queue(Request), a: Allocator, io: Io) void {
         var msg = msg_;
         const lap = msg.start.untilNow(io, .awake);
         if (core(msg.cache, msg.msg, msg.downstream, a, io) catch @panic("bah!")) {
-            log.err("    **    cached response {f}", .{lap});
+            log.warn("      **    cached response {f}", .{lap});
         } else {
-            log.err("    ->    upstream responded {f}", .{lap});
+            log.warn("      ->    upstream responded {f}", .{lap});
         }
     } else |_| {}
 }
