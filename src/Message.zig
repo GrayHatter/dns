@@ -8,6 +8,8 @@ const Message = @This();
 
 pub const Header = @import("Header.zig").Header;
 
+pub const min_size = 12;
+
 pub const TTL = struct {
     duration: Io.Duration,
 
@@ -188,7 +190,7 @@ pub const Resource = struct {
             \\                | SIZE: {d: ^40}|
             \\                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--|
             \\                /                     RDATA                     /
-            \\                /                                               /
+            \\                /              /
             \\                +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
         ;
 
@@ -250,10 +252,12 @@ pub const Class = enum(u16) {
 };
 
 pub fn init(r: *Reader) !Message {
-    if (r.bufferedLen() < 12) return error.MessageTooSmall;
+    if (r.bufferedLen() < min_size) return error.MessageTooSmall;
     const header: Header = .init(r);
-    const last = header.qdcount + header.ancount +
-        header.nscount + header.arcount -| 1;
+    // I've seen > 12 from google
+    if (header.qdcount > 40 or header.ancount > 40 or header.nscount > 20 or header.arcount > 20)
+        return error.InvalidDnsMessage;
+    const last = header.qdcount + header.ancount + header.nscount + header.arcount -| 1;
     var name_buf: [1024]u8 = undefined;
     r.seek -|= 12;
     _ = try payload(header, r, last, &name_buf);

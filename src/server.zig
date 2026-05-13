@@ -7,6 +7,8 @@ pub const std_options: std.Options = .{
 
 var log_level_target: log.Level = .warn;
 
+const default_wait: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(95), .clock = .awake };
+
 pub fn logFunc(
     comptime message_level: log.Level,
     comptime _: @EnumLiteral(),
@@ -46,8 +48,8 @@ fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
 }
 
 fn sendCachedAnswer(
-    mheader: DNS.Message.Header,
-    q: DNS.Message.Question,
+    mheader: Message.Header,
+    q: Message.Question,
     domain: *const Domain,
     zone: *Zone,
     downstream: net.Socket,
@@ -64,7 +66,7 @@ fn sendCachedAnswer(
     switch (zone.behavior) {
         .nxdomain => {
             if (mheader.qdcount == 1) {
-                const ans: DNS.Message = try .answerDrop(mheader.id, q.name);
+                const ans: Message = try .answerDrop(mheader.id, q.name);
                 try downstream.send(io, &addr, ans.slice());
                 log.err("dropping request for {s}", .{q.name});
                 return true;
@@ -93,9 +95,9 @@ fn sendCachedAnswer(
                             return err;
                         };
                     }
-                    const ans: DNS.Message = try .answer(
+                    const ans: Message = try .answer(
                         mheader.id,
-                        &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
+                        &[1]Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
                     );
                     log.debug("cached answer {any}", .{ans.slice()});
                     //std.time.sleep(100_000);
@@ -112,9 +114,9 @@ fn sendCachedAnswer(
                     for (c_result.aaaa.items) |src| {
                         try addr_list.appendBounded(.{ .aaaa = src.bytes });
                     }
-                    const ans: DNS.Message = try .answer(
+                    const ans: Message = try .answer(
                         mheader.id,
-                        &[1]DNS.Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
+                        &[1]Message.AnswerData{.{ .fqdn = q.name, .ips = addr_list.items }},
                     );
                     try downstream.send(io, &addr, ans.slice());
                     log.info("{f}\n", .{ans.header});
@@ -129,7 +131,7 @@ fn sendCachedAnswer(
     return false;
 }
 
-fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !DNS.Message {
+fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Message {
     const peer, const upstream = upstreams.get();
     var w = &upstream.writer.interface;
     var r = &upstream.reader.interface;
@@ -147,11 +149,10 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !DN
     while (true) : ({
         pollfds[0].revents = 0;
         attempt +|= 1;
-        const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(95), .clock = .awake };
-        try wait.sleep(io);
+        try default_wait.sleep(io);
     }) {
         if (attempt > 20) {
-            r.tossBuffered();
+            defer r.tossBuffered();
             return error.UpstreamFailure;
         }
 
@@ -161,24 +162,27 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !DN
             try w.flush();
         }
 
-        if (r.bufferedLen() < 20) {
+        if (r.bufferedLen() < Message.min_size) {
             if (linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset) == 0) continue;
-            //r.fillMore() catch @panic("unreachable");
         }
+
         const peek = r.peek(2) catch continue;
         if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
         log.warn("from {f} expected {X} got {X} ", .{ peer.addr, peek[0..2], net_msg.data[0..2] });
         if (r.bufferedLen() > 60 and attempt > 4) {
             const save = r.seek;
             errdefer r.seek = save;
-            _ = try DNS.Message.init(r);
-            if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2])) break else r.seek = save;
+            _ = try Message.init(r);
+            if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
+                break
+            else
+                r.seek = save;
         }
         continue;
     }
     const start = r.seek;
     var dns_data = r.buffered();
-    const dns_answer = try DNS.Message.init(r);
+    const dns_answer = try Message.init(r);
     dns_data.len = r.seek - start;
 
     log.info("bounce received {}", .{dns_data.len});
@@ -201,7 +205,7 @@ fn core(
     io: Io,
 ) !bool {
     var reader: Reader = .fixed(net_msg.data);
-    const msg: DNS.Message = try .init(&reader);
+    const msg: Message = try .init(&reader);
 
     log.info("incoming packet\n{f}", .{msg.header});
 
@@ -211,7 +215,7 @@ fn core(
         return true;
     }
 
-    var iter: DNS.Message.Iterator = .init(&msg);
+    var iter: Message.Iterator = .init(&msg);
     while (iter.next() catch |err| e: {
         log.err("question iter error {}", .{err});
         log.err("qdata {any}", .{net_msg.data});
@@ -250,7 +254,7 @@ fn core(
         .answer => break,
     };
 
-    const rmsg: DNS.Message = hitUpstream(net_msg, downstream, io) catch return false;
+    const rmsg: Message = hitUpstream(net_msg, downstream, io) catch return false;
     if (rmsg.header.qdcount != 1) return false;
 
     log.debug("answer from upstream:\n{f}", .{rmsg.header});
@@ -262,7 +266,7 @@ fn core(
     return false;
 }
 
-fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void {
+fn cacheAnswer(cache: *ZoneCache, rmsg: Message, a: Allocator, io: Io) !void {
     const now: Io.Timestamp = Io.Clock.awake.now(io);
 
     var lzone: Zone = undefined;
@@ -271,7 +275,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
     try ZoneCache.mutex.lock(io);
     defer ZoneCache.mutex.unlock(io);
 
-    var rit = DNS.Message.Iterator.init(&rmsg);
+    var rit = Message.Iterator.init(&rmsg);
     while (rit.next() catch |err| {
         log.err("relayed iter error {}", .{err});
         return err;
@@ -314,7 +318,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: DNS.Message, a: Allocator, io: Io) !void
                         zone.behavior.cached.expires = now.addDuration(.{
                             .nanoseconds = @max(
                                 r.ttl.duration.nanoseconds,
-                                DNS.Message.TTL.seconds(90).duration.nanoseconds,
+                                Message.TTL.seconds(90).duration.nanoseconds,
                             ),
                         });
                     },
@@ -417,8 +421,8 @@ pub fn main(init: std.process.Init) !void {
         const str = try cache.store(domain.zone);
         _ = try tld.zones.getOrPut(a, .{ .name = str, .behavior = .{ .nxdomain = 300 } });
     }
-    var q_b: [20]Message = undefined;
-    var queue: Queue(Message) = .init(&q_b);
+    var q_b: [20]Request = undefined;
+    var queue: Queue(Request) = .init(&q_b);
 
     var consume0 = io.async(answer, .{ &queue, a, io });
     defer _ = consume0.cancel(io);
@@ -475,7 +479,7 @@ fn defaultSigSet() linux.sigset_t {
     return ss;
 }
 
-const Message = struct {
+const Request = struct {
     msg: net.IncomingMessage,
     ptr: *MsgPtr,
     cache: *ZoneCache,
@@ -483,7 +487,7 @@ const Message = struct {
     start: std.Io.Timestamp,
 };
 
-fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
+fn answer(q: *Queue(Request), a: Allocator, io: Io) void {
     while (q.getOne(io)) |msg_| {
         defer a.destroy(msg_.ptr);
         var msg = msg_;
@@ -496,7 +500,7 @@ fn answer(q: *Queue(Message), a: Allocator, io: Io) void {
     } else |_| {}
 }
 
-fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Queue(Message)) !void {
+fn accept(cache: *ZoneCache, downstream: net.Socket, a: Allocator, io: Io, q: *Queue(Request)) !void {
     const mp: *MsgPtr = try a.create(MsgPtr);
     const msg = try downstream.receive(io, mp);
     log.info("received {}", .{msg.data.len});
@@ -680,7 +684,8 @@ test main {
 const Upstream = @import("Upstream.zig");
 
 const DNS = @import("dns.zig");
-const RData = DNS.Message.Resource.RData;
+const Message = DNS.Message;
+const RData = Message.Resource.RData;
 
 const std = @import("std");
 const sys_endian = @import("builtin").target.cpu.arch.endian();
