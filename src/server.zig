@@ -2,26 +2,40 @@ var upstreams: Upstream = .{ .conns = undefined };
 
 pub const std_options: std.Options = .{
     .log_level = .warn,
-    //.logFn = logFunc,
+    .logFn = logFunc,
 };
 
-var log_level_target: log.Level = .warn;
+var lvl_target: log.Level = .warn;
 
 const default_wait: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(95), .clock = .awake };
 
 pub fn logFunc(
-    comptime message_level: log.Level,
+    comptime lvl: log.Level,
     comptime _: @EnumLiteral(),
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(message_level) > @intFromEnum(log_level_target)) return;
-
+    if (@intFromEnum(lvl) > @intFromEnum(lvl_target)) return;
     var buffer: [512]u8 = undefined;
-    const stderr, const errcfg = std.debug.lockStderrWriter(&buffer);
-    _ = errcfg;
-    defer std.debug.unlockStderrWriter();
-    stderr.print(format ++ "\n", args) catch return;
+    const stderr = std.debug.lockStderr(&buffer).terminal();
+    defer std.debug.unlockStderr();
+    stderr.setColor(switch (lvl) {
+        .err => .red,
+        .warn => .yellow,
+        .info => .green,
+        .debug => .magenta,
+    }) catch {};
+    stderr.setColor(.bold) catch {};
+    stderr.writer.writeAll(lvl.asText()) catch {};
+    stderr.setColor(.reset) catch {};
+    stderr.writer.writeAll(": ") catch {};
+    if (comptime lvl != .err) {
+        stderr.writer.writeAll("\x1B[90m") catch {};
+        stderr.writer.print(format ++ "\n", args) catch {};
+    } else {
+        stderr.writer.print(format ++ "\n", args) catch return;
+    }
+    stderr.setColor(.reset) catch {};
 }
 
 fn usage(arg0: []const u8, err: ?[]const u8) noreturn {
@@ -86,7 +100,7 @@ fn sendCachedAnswer(
             switch (q.qtype) {
                 .a => {
                     if (c_result.a.items.len == 0) {
-                        log.err("    a request is null", .{});
+                        log.warn("     a request is null", .{});
                         return false;
                     }
                     for (c_result.a.items) |src| {
@@ -369,9 +383,9 @@ pub fn main(init: std.process.Init) !void {
         } else if (eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             usage(arg0, null);
         } else if (eql(u8, arg, "--debug")) {
-            log_level_target = .info;
+            lvl_target = .info;
         } else if (eql(u8, arg, "--debug-extra")) {
-            log_level_target = .debug;
+            lvl_target = .debug;
         } else {
             usage(arg0, "invalid arg given");
         }
