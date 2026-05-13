@@ -7,7 +7,7 @@ pub const std_options: std.Options = .{
 
 var lvl_target: log.Level = .warn;
 
-const default_wait: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(45), .clock = .awake };
+const default_wait: Io.Clock.Duration = .{ .raw = .fromMilliseconds(45), .clock = .awake };
 
 pub fn logFunc(
     comptime lvl: log.Level,
@@ -157,7 +157,7 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
         .events = std.math.maxInt(i16),
         .revents = 0,
     }};
-    var timeout: linux.timespec = .{ .sec = 0, .nsec = 200 * ns_per_ms };
+    var timeout: linux.timespec = .{ .sec = 0, .nsec = 100 * ns_per_ms };
     var attempt: u8 = 0;
     try w.writeAll(net_msg.data);
     try w.flush();
@@ -173,8 +173,11 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
 
         if (attempt > 8 and attempt & 1 == 0) {
             log.err(" ***    retrying upstream {f} on {X}", .{ upstream.peer.addr, net_msg.data[0..2] });
+
             try w.writeAll(net_msg.data);
             try w.flush();
+            const retry: Io.Clock.Duration = .{ .raw = .fromMilliseconds(net_msg.data[0]), .clock = .awake };
+            try retry.sleep(io);
         }
 
         if (r.bufferedLen() < Message.min_size) {
@@ -185,8 +188,8 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
         if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
         if (r.bufferedLen() > 30 and attempt > 2) {
             log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], upstream.peer.addr });
-            const save = r.seek;
-            errdefer r.seek = save;
+            //const save = r.seek;
+            //errdefer r.seek = save;
             _ = try Message.init(r);
             if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
                 break;
