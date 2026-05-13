@@ -7,7 +7,7 @@ pub const std_options: std.Options = .{
 
 var lvl_target: log.Level = .warn;
 
-const default_wait: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(95), .clock = .awake };
+const default_wait: std.Io.Clock.Duration = .{ .raw = .fromMilliseconds(45), .clock = .awake };
 
 pub fn logFunc(
     comptime lvl: log.Level,
@@ -183,8 +183,8 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
 
         const peek = r.peek(2) catch continue;
         if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
-        log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], upstream.peer.addr });
-        if (r.bufferedLen() > 60 and attempt > 4) {
+        if (r.bufferedLen() > 30 and attempt > 2) {
+            log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], upstream.peer.addr });
             const save = r.seek;
             errdefer r.seek = save;
             _ = try Message.init(r);
