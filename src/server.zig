@@ -175,9 +175,9 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
             errdefer r.seek = save;
             _ = try Message.init(r);
             if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
-                break
-            else
-                r.seek = save;
+                break;
+            r.seek = save;
+            if (upstreams.next % 32 == 0) r.tossBuffered();
         }
         continue;
     }
