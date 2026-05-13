@@ -133,11 +133,11 @@ fn sendCachedAnswer(
 }
 
 fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Message {
-    const peer, const upstream = upstreams.get();
+    const upstream = upstreams.get();
     var w = &upstream.writer.interface;
     var r = &upstream.reader.interface;
     try r.rebase(2048);
-    log.warn("      asking upstream {f}", .{peer.addr});
+    log.warn("      asking upstream {f}", .{upstream.peer.addr});
     var pollfds: [1]linux.pollfd = .{.{
         .fd = upstream.stream.socket.handle,
         .events = std.math.maxInt(i16),
@@ -158,7 +158,7 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
         }
 
         if (attempt > 8 and attempt & 1 == 0) {
-            log.err("***    retrying upstream {f} on {X}", .{ peer.addr, net_msg.data[0..2] });
+            log.err(" ***    retrying upstream {f} on {X}", .{ upstream.peer.addr, net_msg.data[0..2] });
             try w.writeAll(net_msg.data);
             try w.flush();
         }
@@ -169,15 +169,15 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
 
         const peek = r.peek(2) catch continue;
         if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
-        log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], peer.addr });
+        log.warn("      expected {X} got {X} [from {f}]", .{ net_msg.data[0..2], peek[0..2], upstream.peer.addr });
         if (r.bufferedLen() > 60 and attempt > 4) {
             const save = r.seek;
             errdefer r.seek = save;
             _ = try Message.init(r);
             if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
                 break;
-            r.seek = save;
-            if (upstreams.next % 32 == 0) r.tossBuffered();
+            upstream.flushStale();
+            log.warn("      [flushed {f}]", .{upstream.peer.addr});
         }
         continue;
     }

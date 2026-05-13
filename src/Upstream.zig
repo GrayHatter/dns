@@ -4,11 +4,17 @@ next: u8 = 0,
 const Upstream = @This();
 
 pub const Connection = struct {
+    peer: *const Peer,
     stream: net.Stream,
     reader: net.Stream.Reader,
     writer: net.Stream.Writer,
     r_buf: [4096]u8 = undefined,
     w_buf: [1024]u8 = undefined,
+
+    pub fn flushStale(c: *Connection) void {
+        c.reader.interface.tossBuffered();
+        c.writer.interface.flush() catch {};
+    }
 };
 
 pub const Peer = struct {
@@ -28,9 +34,10 @@ pub const peers: [4]Peer = .{
 };
 
 pub fn init(up: *Upstream, io: Io) !void {
-    for (&up.conns, peers) |*stream, peer| {
+    for (&up.conns, &peers) |*stream, *peer| {
         const stream_fd = try peer.addr.connect(io, .{ .mode = .dgram, .protocol = .udp });
         stream.* = .{
+            .peer = peer,
             .stream = stream_fd,
             .reader = stream_fd.reader(io, &stream.r_buf),
             .writer = stream_fd.writer(io, &stream.w_buf),
@@ -38,7 +45,7 @@ pub fn init(up: *Upstream, io: Io) !void {
     }
 }
 
-pub fn get(up: *Upstream) struct { *const Peer, *Connection } {
+pub fn get(up: *Upstream) *Connection {
     var next = @atomicLoad(u8, &up.next, .unordered);
     while (true) {
         if (@cmpxchgWeak(
@@ -51,7 +58,7 @@ pub fn get(up: *Upstream) struct { *const Peer, *Connection } {
         )) |new| {
             next = new;
         } else {
-            return .{ &peers[next], &up.conns[next] };
+            return &up.conns[next];
         }
     }
 }
