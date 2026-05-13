@@ -131,61 +131,66 @@ fn sendCachedAnswer(
 
 fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !DNS.Message {
     const peer, const upstream = upstreams.get();
-    var w_b: [512]u8 = undefined;
-    var relay_buf: [2048]u8 = undefined;
-    var w = upstream.writer(io, &w_b);
-    var r = upstream.reader(io, &relay_buf);
+    var w = &upstream.writer.interface;
+    var r = &upstream.reader.interface;
+    try r.rebase(2048);
     log.warn("    hitting upstream {f}", .{peer.addr});
     var pollfds: [1]linux.pollfd = .{.{
-        .fd = upstream.socket.handle,
+        .fd = upstream.stream.socket.handle,
         .events = std.math.maxInt(i16),
         .revents = 0,
     }};
-    var timeout: linux.timespec = .{ .sec = 0, .nsec = 100 * ns_per_ms };
-    var recv_msg: []u8 = &.{};
+    var timeout: linux.timespec = .{ .sec = 0, .nsec = 200 * ns_per_ms };
     var attempt: u8 = 0;
-    try w.interface.writeAll(net_msg.data);
-    try w.interface.flush();
+    try w.writeAll(net_msg.data);
+    try w.flush();
     while (true) : ({
         pollfds[0].revents = 0;
         attempt +|= 1;
+        const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(95), .clock = .awake };
+        try wait.sleep(io);
     }) {
-        if (attempt > 3) {
-            log.err("***    retrying upstream {f} on {x}", .{ peer.addr, net_msg.data[0..2] });
-            try w.interface.writeAll(net_msg.data);
-            try w.interface.flush();
+        if (attempt > 20) {
+            r.tossBuffered();
+            return error.UpstreamFailure;
         }
-        if (attempt > 10) return error.UpstreamFailure;
-        const ready = linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset);
-        if (ready == 0 and r.interface.bufferedLen() < 50) continue;
-        if (r.interface.bufferedLen() < 4) r.interface.fillMore() catch @panic("unreachable");
-        recv_msg = r.interface.buffered();
-        if (!eql(u8, relay_buf[0..2], net_msg.data[0..2])) {
-            if (attempt > 2) {
-                log.warn("dropping packet from {f} expected {any} got {any} ", .{
-                    peer.addr, recv_msg[0..2], net_msg.data[0..2],
-                });
 
-                _ = try DNS.Message.init(&r.interface);
-                if (attempt > 6) r.interface.tossBuffered();
-            }
-            const wait = std.Io.Clock.Duration{ .raw = .fromMilliseconds(95), .clock = .awake };
-            try wait.sleep(io);
+        if (attempt > 8 and attempt & 1 == 0) {
+            log.err("***    retrying upstream {f} on {X}", .{ peer.addr, net_msg.data[0..2] });
+            try w.writeAll(net_msg.data);
+            try w.flush();
+        }
 
-            continue;
-        } else break;
+        if (r.bufferedLen() < 20) {
+            if (linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset) == 0) continue;
+            //r.fillMore() catch @panic("unreachable");
+        }
+        const peek = r.peek(2) catch continue;
+        if (eql(u8, peek[0..2], net_msg.data[0..2])) break;
+        log.warn("from {f} expected {X} got {X} ", .{ peer.addr, peek[0..2], net_msg.data[0..2] });
+        if (r.bufferedLen() > 60 and attempt > 4) {
+            const save = r.seek;
+            errdefer r.seek = save;
+            _ = try DNS.Message.init(r);
+            if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2])) break else r.seek = save;
+        }
+        continue;
     }
-    log.info("bounce received {}", .{recv_msg.len});
-    log.debug("bounce data {any}", .{recv_msg});
+    const start = r.seek;
+    var dns_data = r.buffered();
+    const dns_answer = try DNS.Message.init(r);
+    dns_data.len = r.seek - start;
+
+    log.info("bounce received {}", .{dns_data.len});
+    log.debug("bounce data {any}", .{dns_data});
 
     for (blocked_ips) |banned| {
-        if (eql(u8, recv_msg[recv_msg.len - 4 .. recv_msg.len], &banned)) {
-            @memset(recv_msg[recv_msg.len - 4 .. recv_msg.len], 0);
+        if (eql(u8, dns_data[dns_data.len - 4 ..], &banned)) {
+            @memset(dns_data[dns_data.len - 4 ..], 0);
         }
     }
-    //std.debug.print("{x}\n", .{relay_buf[0..b_cnt]});
-    try downstream.send(io, &net_msg.from, recv_msg);
-    return try .init(&r.interface);
+    try downstream.send(io, &net_msg.from, dns_data);
+    return dns_answer;
 }
 
 fn core(
