@@ -166,6 +166,8 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
         attempt +|= 1;
         try default_wait.sleep(io);
     }) {
+        try upstream.mutex.lock(io);
+        defer upstream.mutex.unlock(io);
         if (attempt > 20) {
             defer r.tossBuffered();
             return error.UpstreamFailure;
@@ -181,6 +183,8 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
         }
 
         if (r.bufferedLen() < Message.min_size) {
+            upstream.mutex.unlock(io);
+            defer upstream.mutex.lockUncancelable(io);
             if (linux.ppoll(&pollfds, pollfds.len, &timeout, &sigset) == 0) continue;
         }
 
@@ -191,7 +195,7 @@ fn hitUpstream(net_msg: net.IncomingMessage, downstream: net.Socket, io: Io) !Me
             //const save = r.seek;
             //errdefer r.seek = save;
             _ = try Message.init(r);
-            if (eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
+            if (r.bufferedLen() > 2 and eql(u8, (r.peek(2) catch continue)[0..2], net_msg.data[0..2]))
                 break;
             upstream.flushStale();
             log.warn("      [flushed {f}]", .{upstream.peer.addr});
