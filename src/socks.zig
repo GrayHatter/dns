@@ -66,9 +66,16 @@ pub const v4 = struct {
 
     pub const Reply = struct {
         version: u8 = 4,
-        reply: u8,
+        reply: Status,
         dstport: u16,
         dstaddr: u32,
+
+        pub const Status = enum(u8) {
+            success = 0x5a,
+            rejected = 0x5b,
+            ident_failed = 0x5c,
+            ident_mismatch = 0x5d,
+        };
     };
 
     pub const v4a = struct {};
