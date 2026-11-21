@@ -1,17 +1,17 @@
+alloc: Allocator,
+tld: std.StringHashMapUnmanaged(Zone) = .empty,
+strings: ArrayList(u8) = .empty,
+loc_table: std.HashMapUnmanaged(u32, void, Context, 80) = .empty,
+
 const ZoneCache = @This();
 pub var mutex: std.Io.Mutex = .init;
 
-alloc: Allocator,
-tld: std.StringHashMapUnmanaged(Zone) = .empty,
-strings: std.ArrayListUnmanaged(u8) = .empty,
-loc_table: std.HashMapUnmanaged(
-    u32,
-    void,
-    std.hash_map.StringIndexContext,
-    std.hash_map.default_max_load_percentage,
-) = .{},
+const Adapter = std.hash_map.StringIndexAdapter;
+const Context = std.hash_map.StringIndexContext;
 
-pub fn store(zc: *ZoneCache, str: []const u8) !Zone.String {
+pub fn store(zc: *ZoneCache, str: []const u8, io: Io) !Zone.String {
+    try mutex.lock(io);
+    defer mutex.unlock(io);
     try zc.strings.ensureUnusedCapacity(zc.alloc, str.len + 1);
     zc.strings.appendSliceAssumeCapacity(str);
     zc.strings.appendAssumeCapacity(0);
@@ -21,16 +21,16 @@ pub fn store(zc: *ZoneCache, str: []const u8) !Zone.String {
     const gop = try zc.loc_table.getOrPutContextAdapted(
         zc.alloc,
         key,
-        std.hash_map.StringIndexAdapter{ .bytes = &zc.strings },
-        std.hash_map.StringIndexContext{ .bytes = &zc.strings },
+        Adapter{ .bytes = &zc.strings },
+        Context{ .bytes = &zc.strings },
     );
 
     if (gop.found_existing) {
         zc.strings.shrinkRetainingCapacity(str_index);
-        return @enumFromInt(gop.key_ptr.*);
+        return @fromBackingInt(@intCast(gop.key_ptr.*));
     } else {
         gop.key_ptr.* = str_index;
-        return @enumFromInt(str_index);
+        return @fromBackingInt(@intCast(str_index));
     }
 }
 
@@ -45,15 +45,15 @@ pub const Zone = struct {
         _,
 
         pub fn slice(str: String, zc: *const ZoneCache) [:0]const u8 {
-            const s = zc.strings.items[@intFromEnum(str)..];
-            const end = std.mem.indexOfScalar(u8, s, 0).?;
-            return s[0..end :0];
+            const idx = @backingInt(str);
+            const end = findScalarPos(u8, zc.strings, idx, 0).?;
+            return zc.strings[idx..end :0];
         }
     };
 
     pub const Hasher = struct {
         pub fn hash(_: Hasher, a: Zone) u32 {
-            return @truncate(std.hash.int(@intFromEnum(a.name)));
+            return @truncate(std.hash.int(@backingInt(a.name)));
         }
 
         pub fn eql(_: Hasher, a: Zone, b: Zone, _: usize) bool {
@@ -79,6 +79,7 @@ pub const Behavior = union(enum) {
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const findScalarPos = std.mem.findScalarPos;
 const ArrayList = std.ArrayList;
 const Ip4 = Io.net.Ip4Address;
 const Ip6 = Io.net.Ip6Address;

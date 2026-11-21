@@ -1,3 +1,5 @@
+const network = @This();
+
 pub const Peer = struct {
     addr: Io.net.IpAddress,
     sock: Io.net.Socket,
@@ -70,14 +72,19 @@ pub const Peer = struct {
     }
 };
 
+test network {
+    _ = &std.testing.refAllDecls(network);
+    _ = &Peer;
+}
+
 const std = @import("std");
 const Io = std.Io;
+const Writer = Io.Writer;
+const asBytes = std.mem.asBytes;
+const nativeToBig = std.mem.nativeToBig;
+const bytesToValue = std.mem.bytesToValue;
 const sys = struct {
     const timeval = std.os.linux.timeval;
     const SOCKET = std.os.linux.SOL.SOCKET;
     const RCVTIMEO = std.os.linux.SO.RCVTIMEO;
 };
-const asBytes = std.mem.asBytes;
-const nativeToBig = std.mem.nativeToBig;
-const bytesToValue = std.mem.bytesToValue;
-const Writer = std.Io.Writer;

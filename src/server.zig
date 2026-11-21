@@ -15,7 +15,7 @@ pub fn logFunc(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@intFromEnum(lvl) > @intFromEnum(lvl_target)) return;
+    if (@backingInt(lvl) > @backingInt(lvl_target)) return;
     var buffer: [512]u8 = undefined;
     const stderr = std.debug.lockStderr(&buffer).terminal();
     defer std.debug.unlockStderr();
@@ -253,7 +253,7 @@ fn core(
                     if (!goptr.found_existing) {
                         goptr.key_ptr.* = try a.dupe(u8, domain.tld);
                         goptr.value_ptr.* = .{
-                            .name = try cache.store(domain.zone),
+                            .name = try cache.store(domain.zone, io),
                         };
                     }
                     goptr.value_ptr.hits += 1;
@@ -264,7 +264,7 @@ fn core(
                 }
             };
 
-            const lzone: Zone = .{ .name = try cache.store(domain.zone) };
+            const lzone: Zone = .{ .name = try cache.store(domain.zone, io) };
             if (tld.zones.getKeyPtr(lzone)) |zone| {
                 if (sendCachedAnswer(msg.header, q, &domain, zone, downstream, net_msg.from, io)) |sent| {
                     if (sent) return true;
@@ -308,7 +308,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: Message, a: Allocator, io: Io) !void {
                 if (cache.tld.getOrPut(a, domain.tld)) |goptr| {
                     if (!goptr.found_existing) {
                         goptr.key_ptr.* = try a.dupe(u8, domain.tld);
-                        goptr.value_ptr.* = .{ .name = try cache.store(domain.zone) };
+                        goptr.value_ptr.* = .{ .name = try cache.store(domain.zone, io) };
                     }
                     goptr.value_ptr.hits += 1;
                     break :f goptr.value_ptr;
@@ -317,7 +317,7 @@ fn cacheAnswer(cache: *ZoneCache, rmsg: Message, a: Allocator, io: Io) !void {
                     break;
                 }
             };
-            lzone = .{ .name = try cache.store(domain.zone) };
+            lzone = .{ .name = try cache.store(domain.zone, io) };
             log.info("r question = {s}", .{q.name});
             log.info("r question = \n{f}", .{q});
             log.info("{f}", .{q});
@@ -413,7 +413,7 @@ pub fn main(init: std.process.Init) !void {
     log.err("started", .{});
     var cache: ZoneCache = .{ .alloc = a };
     const preload_tlds = [_][]const u8{ "com", "net", "org", "tv", "ht", "rs" };
-    for (preload_tlds) |ptld| try cache.tld.put(a, ptld, .{ .name = try cache.store(ptld) });
+    for (preload_tlds) |ptld| try cache.tld.put(a, ptld, .{ .name = try cache.store(ptld, io) });
 
     var blocked_results: ArrayList(Result) = .empty;
     defer blocked_results.clearAndFree(a);
@@ -437,10 +437,10 @@ pub fn main(init: std.process.Init) !void {
         const domain: Domain = .init(dd);
         log.err("tld {s}", .{domain.tld});
         const tldgop = try cache.tld.getOrPut(a, domain.tld);
-        if (!tldgop.found_existing) tldgop.value_ptr.* = .{ .name = try cache.store(domain.tld) };
+        if (!tldgop.found_existing) tldgop.value_ptr.* = .{ .name = try cache.store(domain.tld, io) };
         var tld = tldgop.value_ptr;
         log.err("zone {s}", .{domain.zone});
-        const str = try cache.store(domain.zone);
+        const str = try cache.store(domain.zone, io);
         _ = try tld.zones.getOrPut(a, .{ .name = str, .behavior = .{ .nxdomain = 300 } });
     }
     var q_b: [20]Request = undefined;
@@ -700,6 +700,7 @@ test parseHostFile {
 }
 
 test main {
+    _ = &std.testing.refAllDecls(@This());
     _ = &main;
 }
 

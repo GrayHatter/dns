@@ -10,7 +10,7 @@ pub const Connection = struct {
     writer: net.Stream.Writer,
     r_buf: [4096]u8 = undefined,
     w_buf: [1024]u8 = undefined,
-    mutex: std.Io.Mutex = .init,
+    mutex: Io.Mutex = .init,
 
     pub fn flushStale(c: *Connection) void {
         c.reader.interface.tossBuffered();
@@ -62,6 +62,10 @@ pub fn get(up: *Upstream) *Connection {
             return &up.conns[next];
         }
     }
+}
+
+test Upstream {
+    _ = &std.testing.refAllDecls(Upstream);
 }
 
 const std = @import("std");
