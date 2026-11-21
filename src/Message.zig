@@ -19,12 +19,12 @@ pub const TTL = struct {
     pub const @"10min": TTL = .seconds(600);
 
     pub fn expired(ttl: TTL, now: i64) bool {
-        const ttl_s: usize = @intFromEnum(ttl);
+        const ttl_s: usize = @backingInt(ttl);
         return ttl_s < now;
     }
 
     pub fn timestamp(ttl: TTL, now: i64) i64 {
-        return now +| @intFromEnum(ttl);
+        return now +| @backingInt(ttl);
     }
 
     pub fn seconds(s: isize) TTL {
@@ -72,8 +72,8 @@ pub const Question = struct {
 
     pub fn write(q: Question, w: *Writer) !usize {
         const len = try Label.writeName(q.name, w);
-        try w.writeInt(u16, @intFromEnum(q.qtype), .big);
-        try w.writeInt(u16, @intFromEnum(q.class), .big);
+        try w.writeInt(u16, @backingInt(q.qtype), .big);
+        try w.writeInt(u16, @backingInt(q.class), .big);
         return len + 4;
     }
 
@@ -145,9 +145,9 @@ pub const Resource = struct {
         } else {
             idx += try Label.writeName(r.name, w);
         }
-        try w.writeInt(u16, @intFromEnum(r.rtype), .big);
+        try w.writeInt(u16, @backingInt(r.rtype), .big);
         idx += 2;
-        try w.writeInt(u16, @intFromEnum(r.class), .big);
+        try w.writeInt(u16, @backingInt(r.class), .big);
         idx += 2;
         try r.ttl.write(w);
         idx += 4;
@@ -207,7 +207,7 @@ pub const Resource = struct {
                 .aaaa => 16,
                 .cname => |data| data.len,
                 .soa, ._null => @as(usize, 0),
-                .EDNS => @intFromEnum(r.class),
+                .EDNS => @backingInt(r.class),
             },
         });
     }

@@ -10,7 +10,6 @@ test dns {
     _ = &Message;
     _ = &@import("server.zig");
     _ = &@import("client.zig");
-    _ = &@import("network.zig");
 }
 
 test "Message.Header" {

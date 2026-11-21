@@ -43,7 +43,7 @@ pub const Header = packed struct(u96) {
             .tc = 0x2 & hbits != 0,
             .rd = 0x1 & hbits != 0,
             .ra = 0x80 & lbits != 0,
-            .rcode = @enumFromInt(0xf & (lbits)),
+            .rcode = @fromBackingInt(@intCast(0xf & (lbits))),
             .qdcount = r.takeInt(u16, .big) catch unreachable,
             .ancount = r.takeInt(u16, .big) catch unreachable,
             .nscount = r.takeInt(u16, .big) catch unreachable,
